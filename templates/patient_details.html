@@ -101,9 +101,25 @@
                             <span class="visually-hidden">Loading...</span>
                         </span>
                     </button>
+                    <button id="summarizePatientBtn" class="btn btn-success position-relative mt-2">
+                        <span><i class="fas fa-comment-medical"></i> Summarize Patient</span>
+                    </button>
                 </div>
             </div>
         </div>
+    </div>
+</div>
+
+<!-- AI Summary Section -->
+<div class="mt-4">
+    <div id="summaryLoadingIndicator" style="display: none;" class="text-center my-3">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Loading summary...</span>
+        </div>
+        <p>Generating summary, please wait...</p>
+    </div>
+    <div id="patientSummaryDisplay" class="card card-body" style="display: none;">
+        <!-- Summary will be displayed here -->
     </div>
 </div>
 
@@ -219,4 +235,62 @@
         font-size: 60px;
         font-weight: bold;
     }
+    .error-message {
+        color: var(--bs-danger); /* Bootstrap danger color for errors */
+        font-weight: bold;
+    }
 </style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const summarizeButton = document.getElementById('summarizePatientBtn');
+    const summaryDisplay = document.getElementById('patientSummaryDisplay');
+    const loadingIndicator = document.getElementById('summaryLoadingIndicator');
+    const patientId = "{{ patient['id'] }}"; // Get patient_id from template
+
+    if (summarizeButton) {
+        summarizeButton.addEventListener('click', function () {
+            // Show loading indicator and hide previous summary
+            loadingIndicator.style.display = 'block';
+            summaryDisplay.style.display = 'none';
+            summaryDisplay.innerHTML = ''; // Clear previous content
+
+            fetch(`/summarize_patient/${patientId}`)
+                .then(response => {
+                    if (!response.ok) {
+                        // Try to parse error from JSON response, otherwise use status text
+                        return response.json().then(err => {
+                            throw new Error(err.error || `HTTP error! Status: ${response.status}`);
+                        }).catch(() => {
+                            throw new Error(`HTTP error! Status: ${response.status} - ${response.statusText}`);
+                        });
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    loadingIndicator.style.display = 'none';
+                    if (data.summary) {
+                        // Sanitize and display the summary. For now, simple text display.
+                        // Consider a markdown parser or HTML sanitizer if summary can contain rich text.
+                        const summaryParagraph = document.createElement('p');
+                        summaryParagraph.textContent = data.summary;
+                        summaryDisplay.appendChild(summaryParagraph);
+                        summaryDisplay.style.display = 'block';
+                    } else if (data.error) {
+                        displayError(data.error);
+                    }
+                })
+                .catch(error => {
+                    loadingIndicator.style.display = 'none';
+                    console.error('Error fetching patient summary:', error);
+                    displayError(error.message || 'An unexpected error occurred. Please try again.');
+                });
+        });
+    }
+
+    function displayError(message) {
+        summaryDisplay.innerHTML = `<p class="error-message"><i class="fas fa-exclamation-triangle me-2"></i>${message}</p>`;
+        summaryDisplay.style.display = 'block';
+    }
+});
+</script>

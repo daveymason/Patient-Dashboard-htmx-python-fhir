@@ -710,6 +710,89 @@ def login():
         return redirect(url_for('index'))
     return render_template('login.html')
 
+@app.route('/summarize_patient/<patient_id>')
+@login_required
+def summarize_patient(patient_id):
+    # Attempt to get OpenAI API key from environment variable
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if not api_key:
+        logging.error("OPENAI_API_KEY not found in environment variables")
+        return jsonify({"error": "OpenAI API key is not configured on the server."}), 500
+
+    # Initialize OpenAI client
+    try:
+        client = openai.OpenAI(api_key=api_key)
+    except Exception as e:
+        logging.error(f"Failed to initialize OpenAI client: {str(e)}")
+        return jsonify({"error": "Failed to initialize AI service client. Please contact support."}), 500
+
+    # Fetch patient data
+    try:
+        fhir_response = requests.get(f"{FHIR_SERVER}/Patient/{patient_id}", timeout=10)
+        fhir_response.raise_for_status() # Raises an HTTPError for bad responses (4xx or 5xx)
+    except requests.exceptions.HTTPError as e:
+        logging.error(f"FHIR API error when fetching patient {patient_id}: {str(e)}")
+        return jsonify({"error": f"Failed to fetch patient data from FHIR server: {e.response.status_code} {e.response.reason}"}), e.response.status_code
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request exception when fetching patient {patient_id}: {str(e)}")
+        return jsonify({"error": "Failed to connect to FHIR server. Please try again later."}), 503 # Service Unavailable
+
+    patient_data = fhir_response.json()
+
+    # Construct a simplified patient summary for the prompt
+    # This can be expanded to include more details as needed
+    name_data = patient_data.get('name', [{}])[0]
+    patient_name = f"{' '.join(name_data.get('given', []))} {name_data.get('family', '')}".strip()
+    gender = patient_data.get('gender', 'Unknown')
+    birth_date = patient_data.get('birthDate', 'Unknown')
+
+    # Simplified information string
+    patient_info_for_prompt = (
+        f"Patient Name: {patient_name}\n"
+        f"Gender: {gender}\n"
+        f"Birth Date: {birth_date}\n"
+    )
+
+    # Add conditions if available - simplified example
+    conditions_response = requests.get(f"{FHIR_SERVER}/Condition?patient={patient_id}&_count=5")
+    if conditions_response.status_code == 200:
+        conditions_data = conditions_response.json().get('entry', [])
+        if conditions_data:
+            patient_info_for_prompt += "Key Conditions:\n"
+            for entry in conditions_data:
+                condition_text = entry.get('resource', {}).get('code', {}).get('text', 'Unknown condition')
+                patient_info_for_prompt += f"- {condition_text}\n"
+
+    # Construct the prompt for OpenAI
+    prompt = (
+        "Please provide a concise summary of the key information for the following patient, "
+        "highlighting critical aspects that a healthcare provider should be aware of. "
+        "Focus on actionable insights if possible.\n\n"
+        f"{patient_info_for_prompt}"
+    )
+
+    try:
+        # Call OpenAI API
+        chat_completion = client.chat.completions.create(
+            model="gpt-4.1-nano-2025-04-14",
+            messages=[
+                {"role": "system", "content": "You are a helpful medical assistant that summarizes patient data."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        summary = chat_completion.choices[0].message.content
+        return jsonify({"patient_id": patient_id, "summary": summary})
+
+    except openai.AuthenticationError as e:
+        logging.error(f"OpenAI AuthenticationError: {str(e)}")
+        return jsonify({"error": "AI service authentication failed. Please check the configured API key."}), 401
+    except openai.APIError as e:
+        logging.error(f"OpenAI APIError: {str(e)}")
+        return jsonify({"error": "Failed to get summary from AI service due to an API error. Please try again later."}), 500
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while generating summary for patient {patient_id}: {str(e)}")
+        return jsonify({"error": "An unexpected error occurred while communicating with the AI service."}), 500
+
 if __name__ == '__main__':
     debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
     app.run(debug=debug_mode)
