@@ -1,42 +1,49 @@
-document.addEventListener('DOMContentLoaded', () => {
-    const apiKeyInput = document.getElementById('openaiApiKey');
-    const testButton = document.getElementById('testApiKeyBtn');
-    const resultDiv = document.getElementById('apiKeyTestResult');
+document.addEventListener('DOMContentLoaded', function () {
+    'use strict';
 
-    if (testButton) {
-        testButton.addEventListener('click', async () => {
-            const apiKey = apiKeyInput.value.trim();
-            resultDiv.innerHTML = ''; // Clear previous results
-
-            if (!apiKey) {
-                resultDiv.textContent = 'Please enter an API key.';
-                resultDiv.style.color = 'red';
-                return;
-            }
-
-            try {
-                const response = await fetch('/test_openai_key', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ api_key: apiKey }),
-                });
-
-                const data = await response.json();
-
-                if (response.ok) {
-                    resultDiv.textContent = data.message;
-                    resultDiv.style.color = data.success ? 'green' : 'red';
-                } else {
-                    resultDiv.textContent = `Error: ${data.message || response.statusText}`;
-                    resultDiv.style.color = 'red';
-                }
-            } catch (error) {
-                console.error('Error testing API key:', error);
-                resultDiv.textContent = 'An unexpected error occurred. Check the console.';
-                resultDiv.style.color = 'red';
-            }
-        });
+    var apiKeyInput = document.getElementById('openaiApiKey');
+    var testButton = document.getElementById('testApiKeyBtn');
+    var resultDiv = document.getElementById('apiKeyTestResult');
+    if (!testButton || !apiKeyInput || !resultDiv) {
+        return;
     }
+
+    function setResult(message, tone) {
+        resultDiv.textContent = message;
+        resultDiv.className = 'mt-3 ' + (tone ? 'text-' + tone : '');
+    }
+
+    function csrfToken() {
+        var meta = document.querySelector('meta[name="csrf-token"]');
+        return meta ? meta.getAttribute('content') : '';
+    }
+
+    testButton.addEventListener('click', async function () {
+        var apiKey = apiKeyInput.value.trim();
+        if (!apiKey) {
+            setResult('Enter an API key first.', 'danger');
+            return;
+        }
+
+        testButton.disabled = true;
+        setResult('Checking...', 'muted');
+
+        try {
+            var response = await fetch('/test_openai_key', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrfToken()
+                },
+                body: JSON.stringify({ api_key: apiKey })
+            });
+            var data = await response.json();
+            setResult(data.message || 'Unexpected response.', data.success ? 'success' : 'danger');
+        } catch (error) {
+            console.error('Key test failed:', error);
+            setResult('The key could not be checked. Check your connection and try again.', 'danger');
+        } finally {
+            testButton.disabled = false;
+        }
+    });
 });

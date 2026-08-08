@@ -1,23 +1,39 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Settings</title>
-    <!-- If a base.html or common CSS exists, link it here -->
-</head>
-<body>
-    {% include "header.html" %}
-    <div class="container mt-4">
-        <h2>AI Settings</h2>
+{% extends "base.html" %}
+{% block title %}AI Settings &mdash; FHIR Patient Dashboard{% endblock %}
+
+{% block content %}
+<h2 class="text-primary mb-4"><i class="fas fa-cog"></i> AI Settings</h2>
+
+<div class="alert alert-warning">
+    <i class="fas fa-exclamation-triangle me-2"></i>
+    <strong>This key is not stored yet.</strong> The button below only checks that
+    the key works. Server-side encrypted storage, and the features that will use
+    it, are still to come.
+</div>
+
+<div class="card">
+    <div class="card-body" style="max-width: 640px;">
         <div class="mb-3">
-            <label for="openaiApiKey" class="form-label">OpenAI API Key:</label>
-            <input type="text" class="form-control" id="openaiApiKey" name="openai_api_key">
+            <label for="openaiApiKey" class="form-label">OpenAI API key</label>
+            <input type="password" class="form-control font-monospace" id="openaiApiKey"
+                   name="openai_api_key" autocomplete="off" spellcheck="false"
+                   placeholder="sk-...">
+            <div class="form-text">
+                The key is sent to this server to be checked and is not written to disk or logged.
+            </div>
         </div>
-        <button id="testApiKeyBtn" class="btn btn-primary">Test</button>
-        <div id="apiKeyTestResult" class="mt-3"></div>
+        <button id="testApiKeyBtn" class="btn btn-primary">Test key</button>
+        <div id="apiKeyTestResult" class="mt-3" role="status" aria-live="polite"></div>
     </div>
-    <!-- If a base.html or common JS exists, link it here -->
-    <script src="{{ url_for('static', filename='ai_settings.js') }}" defer></script>
-</body>
-</html>
+</div>
+
+<div class="mt-4">
+    <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">
+        <i class="fas fa-arrow-left"></i> Back to dashboard
+    </a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='ai_settings.js') }}"></script>
+{% endblock %}

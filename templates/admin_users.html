@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Users &mdash; FHIR Patient Dashboard{% endblock %}
+
+{% block content %}
+<h2 class="text-primary mb-4"><i class="fas fa-user-shield"></i> Users</h2>
+
+<p class="text-muted">
+    A wallet that signs in for the first time is recorded as <strong>pending</strong>
+    and cannot read any patient data until it is activated here.
+</p>
+
+<div class="table-responsive">
+    <table class="table table-hover align-middle">
+        <thead class="table-dark">
+            <tr>
+                <th>Wallet</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th>Last sign-in</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="admin-user-rows">
+            {% include "admin_user_rows.html" %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

@@ -1,11 +1,20 @@
 <h2 class="text-primary"><i class="fas fa-users"></i> Patients</h2>
 
+{% if error %}
+<div class="alert alert-danger">
+    <i class="fas fa-exclamation-triangle me-2"></i>
+    <strong>Patient list could not be loaded.</strong> {{ error }}
+</div>
+{% endif %}
+
 <div class="row mb-3">
     <div class="col-md-6">
         <div class="input-group">
-            <input type="search" id="patient-search" name="q" class="form-control" placeholder="Search patients..." 
-                   hx-post="/fhir/search_patients" 
-                   hx-trigger="keyup changed delay:500ms, search" 
+            <input type="search" id="patient-search" name="q" class="form-control"
+                   placeholder="Search by name, ID or identifier..."
+                   aria-label="Search patients"
+                   hx-post="/fhir/search_patients"
+                   hx-trigger="keyup changed delay:500ms, search"
                    hx-target="#patients-table-body"
                    hx-indicator="#search-indicator">
             <span class="input-group-text">
@@ -14,6 +23,11 @@
             </span>
         </div>
     </div>
+    {% if total is not none %}
+    <div class="col-md-6 d-flex align-items-center justify-content-md-end text-muted">
+        <small>{{ total }} patients on the record server</small>
+    </div>
+    {% endif %}
 </div>
 
 <div class="table-responsive">
@@ -22,7 +36,7 @@
             <tr>
                 <th><i class="fas fa-id-card"></i> | ID</th>
                 <th><i class="fas fa-user"></i> | Name</th>
-                <th><i class="fas fa-genderless"></i> | Gender </th>
+                <th><i class="fas fa-genderless"></i> | Gender</th>
                 <th><i class="fas fa-birthday-cake"></i> | Birth Date</th>
                 <th><i class="fas fa-map-marker-alt"></i> | Address</th>
                 <th><i class="fas fa-phone"></i> | Contact</th>
@@ -30,28 +44,7 @@
             </tr>
         </thead>
         <tbody id="patients-table-body">
-            {% for patient in patients %}
-            <tr>
-                <td>{{ patient.id }}</td>
-                <td>{{ patient.name }}</td>
-                <td>{{ patient.gender }}</td>
-                <td>{{ patient.birthDate }}</td>
-                <td>{{ patient.address }}</td>
-                <td>{{ patient.telecom }}</td>
-                <td>
-                    <button class="btn btn-primary position-relative" 
-                            hx-get="/fhir/Patient/{{ patient.id }}" 
-                            hx-target="#content"
-                            hx-indicator="this">
-                        <span>View Details <i class="fas fa-arrow-right"></i></span>
-                        <span class="htmx-indicator position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
-                            <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                            <span class="visually-hidden">Loading...</span>
-                        </span>
-                    </button>
-                </td>
-            </tr>
-            {% endfor %}
+            {% include "patient_table_body.html" %}
         </tbody>
     </table>
 </div>

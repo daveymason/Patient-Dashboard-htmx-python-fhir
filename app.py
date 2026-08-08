@@ -1,715 +1,800 @@
-from flask import Flask, render_template, jsonify, request, session, redirect, url_for
-import requests
-import logging
-from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-from datetime import datetime
-import os  # Add os module for environment variables
-import openai
-import binascii
-from eth_account.messages import defunct_hash_message, encode_defunct
-from eth_account import Account
+"""FHIR Patient Dashboard.
 
-app = Flask(__name__)
-app.secret_key = os.urandom(24) # Needed for Flask session management
+Flask + HTMX viewer over a FHIR R4 server. Routes return HTML fragments that
+HTMX swaps into the page, so there is no client-side framework and no build step.
+"""
+import logging
+
+import click
+from flask import (
+    Flask, abort, jsonify, redirect, render_template, request, session, url_for
+)
+from flask_login import (
+    LoginManager, current_user, login_required, login_user, logout_user
+)
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_wtf.csrf import CSRFProtect
+
+import auth
+import db
+from config import (
+    ConfigError, is_valid_wallet_address, resolve_secret_key, select_config
+)
+from fhir_client import FhirClient
+from fhir_utils import (
+    calculate_age, first_coding_display, format_address, format_fhir_date,
+    observation_code, observation_value, patient_display_name, patient_initials,
+    sort_key,
+)
+from logging_setup import configure_logging, pseudonymize
+
+logger = logging.getLogger(__name__)
 
 login_manager = LoginManager()
-login_manager.init_app(app)
-login_manager.login_view = 'login' # Or your preferred login route
+csrf = CSRFProtect()
+limiter = Limiter(key_func=get_remote_address)
 
-# Use environment variable with fallback to current value
-FHIR_SERVER = os.environ.get('FHIR_SERVER_URL', 'http://hapi.fhir.org/baseR4')
+# LOINC codes for the vital signs panel.
+VITAL_SIGN_CODES = {
+    'blood_pressure': ('85354-9', 'Blood Pressure'),
+    'heart_rate': ('8867-4', 'Heart Rate'),
+    'temperature': ('8310-5', 'Temperature'),
+    'respiratory_rate': ('9279-1', 'Respiratory Rate'),
+}
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
 
-# User model for Flask-Login
-class User(UserMixin):
-    def __init__(self, id):
-        self.id = id # wallet_address will be the id
+# ---------------------------------------------------------------------------
+# Application factory
+# ---------------------------------------------------------------------------
 
-    @staticmethod
-    def get(user_id):
-        # This is a simplified 'get' method. In a real app, you might query a database.
-        # For this example, if a user_id is provided, we create a User object.
-        # Flask-Login uses this to manage the user session.
-        return User(user_id)
+def create_app(config_object=None):
+    app = Flask(__name__)
 
-@login_manager.user_loader
-def load_user(user_id):
-    return User.get(user_id)
+    config_class = config_object or select_config()
+    app.config.from_object(config_class)
 
-@app.route('/')
-def index():
-    # Redirect unauthenticated users to the dedicated login page
-    if not current_user.is_authenticated:
-        return redirect(url_for('login'))
-    return render_template('index.html')
+    if not app.config.get('SECRET_KEY'):
+        app.config['SECRET_KEY'] = resolve_secret_key(app.config.get('DEBUG', False))
 
-@app.route('/health')
-def health_check():
-    """Simple health check endpoint for monitoring"""
-    return jsonify({"status": "ok", "fhir_server": FHIR_SERVER})
+    configure_logging(app.config['LOG_LEVEL'], as_json=app.config['LOG_JSON'])
 
-def process_patient_results(patients):
-    """Process patient results for consistent display"""
-    processed_patients = []
-    
-    for patient_entry in patients:
-        resource = patient_entry['resource']
+    app.fhir = FhirClient(
+        app.config['FHIR_SERVER_URL'],
+        timeout=app.config['FHIR_TIMEOUT'],
+    )
 
-        # Extract name
-        name = resource.get('name', [{'given': ['Unknown'], 'family': ''}])[0]
-        full_name = ' '.join(name.get('given', ['Unknown']) + [name.get('family', '')])
+    login_manager.init_app(app)
+    login_manager.login_view = 'login'
+    login_manager.user_loader(auth.load_user)
+    login_manager.session_protection = 'strong'
 
-        # Extract gender
-        gender = resource.get('gender', 'Unknown')
+    csrf.init_app(app)
+    limiter.init_app(app)
 
-        # Extract birth date
-        birth_date = resource.get('birthDate', 'Unknown')
+    app.teardown_appcontext(db.close_connection)
+    db.init_db(app)
 
-        # Extract address
-        address_info = resource.get('address', [{'line': ['Unknown Address']}])[0]
-        address_parts = address_info.get('line', [])
-        address_parts.extend([
-            address_info.get('city', ''),
-            address_info.get('state', ''),
-            address_info.get('postalCode', '')
-        ])
-        address = ', '.join(filter(None, address_parts))  # Filter out empty strings
+    register_routes(app)
+    register_cli(app)
 
-        # Extract telecom
-        telecom_info = resource.get('telecom', [{'value': 'Unknown Contact'}])[0]
-        telecom = telecom_info.get('value', 'Unknown Contact')
+    # Nobody can approve a pending account if there is no reachable admin, so
+    # say so at boot rather than letting the operator discover it by being
+    # locked out.
+    with app.app_context():
+        if db.count_active_admins() == 0:
+            logger.warning(
+                'No active administrator account exists. Nobody can approve '
+                'sign-in requests. Grant one with: '
+                'flask --app app grant-admin <wallet-address>'
+            )
 
-        processed_patient = {
-            "id": resource.get('id', 'Unknown'),
-            "name": full_name,
-            "gender": gender,
-            "birthDate": birth_date,
-            "address": address,
-            "telecom": telecom,
-        }
+    @app.before_request
+    def _make_session_permanent():
+        session.permanent = True
 
-        processed_patients.append(processed_patient)
-        
-    return processed_patients
+    logger.info(
+        'Application started',
+        extra={'fhir_server': app.config['FHIR_SERVER_URL'], 'debug': app.config['DEBUG']},
+    )
+    return app
 
-def get_patients_table_body():
-    """Helper to get patient table body for reuse"""
-    response = requests.get(f"{FHIR_SERVER}/Patient?_count=10", timeout=10)  # Added timeout
-    if response.status_code == 200:
-        patients = response.json().get('entry', [])
-        processed_patients = process_patient_results(patients)
-        return render_template('patient_table_body.html', patients=processed_patients)
-    else:
-        return "<tr><td colspan='7'>Error loading patients</td></tr>", 500
 
-@app.route('/fhir/Patients')
-@login_required
-def get_patients():
-    response = requests.get(f"{FHIR_SERVER}/Patient?_count=10", timeout=10)  # Added timeout
-    if response.status_code == 200:
-        patients = response.json().get('entry', [])
-        processed_patients = process_patient_results(patients)
-        return render_template('patients.html', patients=processed_patients)
-    else:
-        return jsonify({"error": "Failed to fetch patients"}), 500
+# ---------------------------------------------------------------------------
+# Audit helper
+# ---------------------------------------------------------------------------
 
-@app.route('/fhir/search_patients', methods=['POST'])
-@login_required
-def search_patients():
-    search_term = request.form.get('q', '').strip().lower()
-    
-    if not search_term:
-        # If search is empty, return all patients
-        return get_patients_table_body()
-    
-    # Search patients by name or identifier
-    try:
-        response = requests.get(f"{FHIR_SERVER}/Patient?_count=20&name:contains={search_term}", timeout=10)
-        
-        if response.status_code == 200:
-            patients = response.json().get('entry', [])
-            processed_patients = process_patient_results(patients)
-            return render_template('patient_table_body.html', patients=processed_patients)
-        else:
-            logging.error(f"API error: {response.status_code} when searching patients")
-            return "<tr><td colspan='7'>Error searching patients</td></tr>", 500
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Request failed: {str(e)}")
-        return "<tr><td colspan='7'>Connection error, please try again</td></tr>", 500
+def audit(action, outcome='success', resource_type=None, resource_id=None, detail=None):
+    """Record an access to the audit trail, with the patient ID pseudonymised."""
+    db.write_audit(
+        action=action,
+        outcome=outcome,
+        actor=current_user.get_id() if current_user.is_authenticated else None,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        remote_addr=request.remote_addr,
+        user_agent=request.headers.get('User-Agent'),
+        detail=detail,
+    )
 
-@app.route('/fhir/Patient/<patient_id>')
-@login_required
-def get_patient(patient_id):
-    response = requests.get(f"{FHIR_SERVER}/Patient/{patient_id}")
-    if response.status_code == 200:
-        patient = response.json()
 
-        # Simplify work phone numbers
-        work_telecoms = [telecom['value'] for telecom in patient.get('telecom', []) if telecom.get('use') == 'work']
-        patient['work_phone'] = ', '.join(work_telecoms)
+def _fragment_error(message, columns=None):
+    """Render an inline error for an HTMX panel.
 
-        # Simplify the address
-        if patient.get('address'):
-            address_parts = patient['address'][0].get('line', [])
-            address_parts.extend([
-                patient['address'][0].get('city', ''),
-                patient['address'][0].get('state', ''),
-                patient['address'][0].get('postalCode', '')
-            ])
-            patient['simple_address'] = ', '.join(filter(None, address_parts))  # Filter out empty strings
-
-        # Simplify identifier, assume the first identifier is the most relevant
-        if patient.get('identifier'):
-            patient['simple_identifier'] = patient['identifier'][0].get('value', '')
-            
-        # Extract communication languages
-        patient['languages'] = []
-        if patient.get('communication'):
-            for comm in patient['communication']:
-                if 'language' in comm:
-                    language_text = comm['language'].get('text', '')
-                    if not language_text and 'coding' in comm['language']:
-                        language_text = comm['language']['coding'][0].get('display', '')
-                    if language_text:
-                        preferred = 'Preferred' if comm.get('preferred', False) else ''
-                        patient['languages'].append({'name': language_text, 'preferred': preferred})
-
-        # Process age from birth date
-        if patient.get('birthDate'):
-            try:
-                birth_date = datetime.strptime(patient['birthDate'], '%Y-%m-%d')
-                today = datetime.now()
-                age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
-                patient['age'] = age
-            except ValueError:
-                patient['age'] = 'Unknown'
-
-        return render_template('patient_details.html', patient=patient)
-    else:
-        return jsonify({"error": "Failed to fetch patient details"}), 500
-
-@app.route('/fhir/LabResults/<patient_id>')
-@login_required
-def get_lab_results(patient_id):
-    response = requests.get(f"{FHIR_SERVER}/Observation?patient={patient_id}&_sort=-date&_count=5")
-    if response.status_code == 200:
-        lab_results = response.json().get('entry', [])
-        # Prepare lab results for rendering
-        for result in lab_results:
-            effectiveDateTime = result['resource'].get('effectiveDateTime', '')
-            formatted_date = datetime.strptime(effectiveDateTime[:-6], '%Y-%m-%dT%H:%M:%S').strftime('%Y-%m-%d')
-            result['resource']['formattedDate'] = formatted_date
-        # Render the results into HTML using the lab_results template
-        return render_template('lab_results.html', lab_results=lab_results)
-    else:
-        return "Lab results not found", 404
-
-@app.route('/fhir/VitalSigns/<patient_id>')
-@login_required
-def get_vital_signs(patient_id):
-    # First, get blood pressure observations
-    bp_response = requests.get(f"{FHIR_SERVER}/Observation?patient={patient_id}&code=http://loinc.org|85354-9&_sort=-date&_count=10")
-    
-    # Get heart rate observations
-    hr_response = requests.get(f"{FHIR_SERVER}/Observation?patient={patient_id}&code=http://loinc.org|8867-4&_sort=-date&_count=10")
-    
-    # Get temperature observations
-    temp_response = requests.get(f"{FHIR_SERVER}/Observation?patient={patient_id}&code=http://loinc.org|8310-5&_sort=-date&_count=10")
-    
-    # Get respiratory rate observations
-    resp_response = requests.get(f"{FHIR_SERVER}/Observation?patient={patient_id}&code=http://loinc.org|9279-1&_sort=-date&_count=10")
-    
-    vital_signs = []
-    
-    # Process blood pressure readings
-    if bp_response.status_code == 200:
-        bp_data = bp_response.json().get('entry', [])
-        for entry in bp_data:
-            resource = entry.get('resource', {})
-            
-            # Extract the date
-            effective_date = resource.get('effectiveDateTime', '')
-            if effective_date:
-                try:
-                    formatted_date = datetime.strptime(effective_date[:-6], '%Y-%m-%dT%H:%M:%S').strftime('%Y-%m-%d')
-                except (ValueError, TypeError):
-                    formatted_date = 'Unknown Date'
-            else:
-                formatted_date = 'Unknown Date'
-                
-            # Extract components (systolic/diastolic)
-            components = resource.get('component', [])
-            systolic = None
-            diastolic = None
-            
-            for component in components:
-                coding = component.get('code', {}).get('coding', [{}])
-                if coding and coding[0].get('display') == 'Systolic blood pressure':
-                    systolic = component.get('valueQuantity', {}).get('value')
-                elif coding and coding[0].get('display') == 'Diastolic blood pressure':
-                    diastolic = component.get('valueQuantity', {}).get('value')
-            
-            # Only add if we have both systolic and diastolic
-            if systolic is not None and diastolic is not None:
-                vital_signs.append({
-                    'date': formatted_date,
-                    'type': 'Blood Pressure',
-                    'value': f'{systolic}/{diastolic}',
-                    'unit': 'mmHg',
-                    'status': resource.get('status', 'unknown'),
-                    'components': {
-                        'systolic': systolic,
-                        'diastolic': diastolic
-                    }
-                })
-    
-    # Process heart rate readings
-    if hr_response.status_code == 200:
-        hr_data = hr_response.json().get('entry', [])
-        for entry in hr_data:
-            resource = entry.get('resource', {})
-            
-            # Extract the date
-            effective_date = resource.get('effectiveDateTime', '')
-            if effective_date:
-                try:
-                    formatted_date = datetime.strptime(effective_date[:-6], '%Y-%m-%dT%H:%M:%S').strftime('%Y-%m-%d')
-                except (ValueError, TypeError):
-                    formatted_date = 'Unknown Date'
-            else:
-                formatted_date = 'Unknown Date'
-                
-            # Get heart rate value
-            value_quantity = resource.get('valueQuantity', {})
-            value = value_quantity.get('value')
-            
-            # Make sure value is a number
-            try:
-                value = float(value)
-            except (ValueError, TypeError):
-                value = 0
-            
-            vital_signs.append({
-                'date': formatted_date,
-                'type': 'Heart Rate',
-                'value': value,
-                'unit': value_quantity.get('unit', 'bpm'),
-                'status': resource.get('status', 'unknown')
-            })
-    
-    # Process temperature readings
-    if temp_response.status_code == 200:
-        temp_data = temp_response.json().get('entry', [])
-        for entry in temp_data:
-            resource = entry.get('resource', {})
-            
-            # Extract the date
-            effective_date = resource.get('effectiveDateTime', '')
-            if effective_date:
-                try:
-                    formatted_date = datetime.strptime(effective_date[:-6], '%Y-%m-%dT%H:%M:%S').strftime('%Y-%m-%d')
-                except (ValueError, TypeError):
-                    formatted_date = 'Unknown Date'
-            else:
-                formatted_date = 'Unknown Date'
-                
-            # Get temperature value
-            value_quantity = resource.get('valueQuantity', {})
-            
-            vital_signs.append({
-                'date': formatted_date,
-                'type': 'Temperature',
-                'value': value_quantity.get('value', 'Unknown'),
-                'unit': value_quantity.get('unit', '°C'),
-                'status': resource.get('status', 'unknown')
-            })
-    
-    # Process respiratory rate readings
-    if resp_response.status_code == 200:
-        resp_data = resp_response.json().get('entry', [])
-        for entry in resp_data:
-            resource = entry.get('resource', {})
-            
-            # Extract the date
-            effective_date = resource.get('effectiveDateTime', '')
-            if effective_date:
-                try:
-                    formatted_date = datetime.strptime(effective_date[:-6], '%Y-%m-%dT%H:%M:%S').strftime('%Y-%m-%d')
-                except (ValueError, TypeError):
-                    formatted_date = 'Unknown Date'
-            else:
-                formatted_date = 'Unknown Date'
-                
-            # Get respiratory rate value
-            value_quantity = resource.get('valueQuantity', {})
-            
-            vital_signs.append({
-                'date': formatted_date,
-                'type': 'Respiratory Rate',
-                'value': value_quantity.get('value', 'Unknown'),
-                'unit': value_quantity.get('unit', '/min'),
-                'status': resource.get('status', 'unknown')
-            })
-    
-    # Sort vital signs by date (newest first)
-    vital_signs.sort(key=lambda x: x['date'], reverse=True)
-    
-    return render_template('vital_signs.html', vital_signs=vital_signs)
-
-@app.route('/fhir/Medications/<patient_id>')
-@login_required
-def get_medications(patient_id):
-    # Get medications
-    meds_response = requests.get(f"{FHIR_SERVER}/MedicationRequest?patient={patient_id}&_count=10")
-    
-    medications = []
-    
-    if meds_response.status_code == 200:
-        meds_data = meds_response.json()
-        # Check if 'entry' exists in the response
-        if 'entry' in meds_data:
-            for entry in meds_data.get('entry', []):
-                resource = entry.get('resource', {})
-                
-                # Extract the date
-                authored_date = resource.get('authoredOn', '')
-                if authored_date:
-                    try:
-                        formatted_date = datetime.strptime(authored_date[:10], '%Y-%m-%d').strftime('%Y-%m-%d')
-                    except (ValueError, TypeError):
-                        formatted_date = 'Unknown Date'
-                else:
-                    formatted_date = 'Unknown Date'
-                
-                # Extract medication reference or codeable concept
-                medication_name = "Unknown Medication"
-                if resource.get('medicationReference'):
-                    medication_name = resource['medicationReference'].get('display', 'Unknown Medication')
-                elif resource.get('medicationCodeableConcept'):
-                    coding = resource['medicationCodeableConcept'].get('coding', [{}])
-                    if coding:
-                        medication_name = coding[0].get('display', 'Unknown Medication')
-                    else:
-                        medication_name = resource['medicationCodeableConcept'].get('text', 'Unknown Medication')
-                
-                # Get dosage instructions
-                dosage_instructions = []
-                if resource.get('dosageInstruction'):
-                    for dosage in resource['dosageInstruction']:
-                        text = dosage.get('text', '')
-                        if text:
-                            dosage_instructions.append(text)
-                
-                # Get status
-                status = resource.get('status', 'unknown')
-                
-                medications.append({
-                    'date': formatted_date,
-                    'name': medication_name,
-                    'dosage': ', '.join(dosage_instructions) if dosage_instructions else 'No specific instructions',
-                    'status': status
-                })
-        
-        # Log if no medications found
-        if not medications:
-            logging.info(f"No medications found for patient {patient_id}")
-    
-    # Sort medications by date (newest first)
-    medications.sort(key=lambda x: x['date'], reverse=True)
-    
-    return render_template('medications.html', medications=medications)
-
-@app.route('/fhir/Allergies/<patient_id>')
-@login_required
-def get_allergies(patient_id):
-    # Get allergies
-    allergy_response = requests.get(f"{FHIR_SERVER}/AllergyIntolerance?patient={patient_id}&_count=10")
-    
-    allergies = []
-    
-    if allergy_response.status_code == 200:
-        allergy_data = allergy_response.json()
-        # Check if 'entry' exists in the response
-        if 'entry' in allergy_data:
-            for entry in allergy_data.get('entry', []):
-                resource = entry.get('resource', {})
-                
-                # Extract the date
-                recorded_date = resource.get('recordedDate', '')
-                if recorded_date:
-                    try:
-                        formatted_date = datetime.strptime(recorded_date[:10], '%Y-%m-%d').strftime('%Y-%m-%d')
-                    except (ValueError, TypeError):
-                        formatted_date = 'Unknown Date'
-                else:
-                    formatted_date = 'Unknown Date'
-                
-                # Extract allergy code or display
-                allergy_name = "Unknown Allergen"
-                if resource.get('code'):
-                    coding = resource['code'].get('coding', [{}])
-                    if coding:
-                        allergy_name = coding[0].get('display', 'Unknown Allergen')
-                    else:
-                        allergy_name = resource['code'].get('text', 'Unknown Allergen')
-                
-                # Get reaction
-                reactions = []
-                if resource.get('reaction'):
-                    for reaction in resource['reaction']:
-                        if reaction.get('manifestation'):
-                            for manifestation in reaction['manifestation']:
-                                if manifestation.get('coding'):
-                                    reactions.append(manifestation['coding'][0].get('display', ''))
-                                elif manifestation.get('text'):
-                                    reactions.append(manifestation['text'])
-                
-                # Get status
-                clinical_status = "Unknown"
-                if resource.get('clinicalStatus'):
-                    if resource['clinicalStatus'].get('coding'):
-                        clinical_status = resource['clinicalStatus']['coding'][0].get('display', 'Unknown')
-                    else:
-                        clinical_status = resource['clinicalStatus'].get('text', 'Unknown')
-                
-                # Get severity
-                severity = resource.get('severity', 'unknown')
-                
-                allergies.append({
-                    'date': formatted_date,
-                    'name': allergy_name,
-                    'reactions': reactions,
-                    'severity': severity,
-                    'status': clinical_status
-                })
-        
-        # Log if no allergies found
-        if not allergies:
-            logging.info(f"No allergies found for patient {patient_id}")
-    
-    # Sort allergies by date (newest first)
-    allergies.sort(key=lambda x: x['date'], reverse=True)
-    
-    return render_template('allergies.html', allergies=allergies)
-
-@app.route('/fhir/Demographics')
-@login_required
-def get_demographics():
-    """Get patient demographics statistics for visualization"""
-    # Fetch patients for demographic analysis
-    response = requests.get(f"{FHIR_SERVER}/Patient?_count=100")
-    
-    if response.status_code == 200:
-        patients = response.json().get('entry', [])
-        
-        # Initialize counters
-        gender_counts = {"male": 0, "female": 0, "other": 0, "unknown": 0}
-        age_groups = {"0-18": 0, "19-35": 0, "36-55": 0, "56-75": 0, "76+": 0, "unknown": 0}
-        
-        current_year = datetime.now().year
-        
-        # Process each patient
-        for patient_entry in patients:
-            resource = patient_entry.get('resource', {})
-            
-            # Count genders
-            gender = resource.get('gender', '').lower()
-            if gender in gender_counts:
-                gender_counts[gender] += 1
-            else:
-                gender_counts["unknown"] += 1
-                
-            # Determine age group
-            birth_date = resource.get('birthDate')
-            if birth_date and len(birth_date) >= 4:
-                try:
-                    birth_year = int(birth_date[:4])
-                    age = current_year - birth_year
-                    
-                    if age <= 18:
-                        age_groups["0-18"] += 1
-                    elif age <= 35:
-                        age_groups["19-35"] += 1
-                    elif age <= 55:
-                        age_groups["36-55"] += 1
-                    elif age <= 75:
-                        age_groups["56-75"] += 1
-                    else:
-                        age_groups["76+"] += 1
-                except ValueError:
-                    age_groups["unknown"] += 1
-            else:
-                age_groups["unknown"] += 1
-        
-        # Calculate total for percentages
-        total_patients = sum(gender_counts.values())
-        
-        demographics = {
-            "gender_counts": gender_counts,
-            "age_groups": age_groups,
-            "total_patients": total_patients
-        }
-        
-        return render_template('demographics.html', demographics=demographics)
-    else:
-        return jsonify({"error": "Failed to fetch patient demographics"}), 500
-
-@app.route('/fhir/Dashboard')
-@login_required
-def get_dashboard():
-    """Get dashboard data for the main dashboard view"""
-    # Fetch patients
-    patient_response = requests.get(f"{FHIR_SERVER}/Patient?_count=100")
-    
-    # Fetch observations count
-    observation_response = requests.get(f"{FHIR_SERVER}/Observation?_summary=count")
-    
-    patient_count = 0
-    observation_count = 0
-    gender_counts = {"male": 0, "female": 0, "other": 0, "unknown": 0}
-    recent_patients = []
-    
-    if patient_response.status_code == 200:
-        patient_data = patient_response.json()
-        patients = patient_data.get('entry', [])
-        patient_count = len(patients)
-        
-        # Process gender counts
-        for patient_entry in patients:
-            resource = patient_entry.get('resource', {})
-            
-            # Count genders
-            gender = resource.get('gender', '').lower()
-            if gender in gender_counts:
-                gender_counts[gender] += 1
-            else:
-                gender_counts["unknown"] += 1
-                
-        # Get recent patients
-        recent_patients_data = patients[:5]  # Just take the first 5 for simplicity
-        recent_patients = process_patient_results(recent_patients_data)
-    
-    if observation_response.status_code == 200:
-        observation_data = observation_response.json()
-        observation_count = observation_data.get('total', 0)
-    
-    dashboard_data = {
-        'patient_count': patient_count,
-        'observation_count': observation_count,
-        'gender_counts': gender_counts,
-        'recent_patients': recent_patients,
-        'fhir_server_url': FHIR_SERVER
-    }
-    
-    return render_template('dashboard.html', **dashboard_data)
-
-@app.route('/settings/ai')
-@login_required
-def ai_settings():
-    return render_template('ai_settings.html')
-
-@app.route('/test_openai_key', methods=['POST'])
-@login_required
-def test_openai_key():
-    api_key = request.json.get('api_key')
-    if not api_key:
-        return jsonify({'error': 'API key is required'}), 400
-
-    try:
-        # It's good practice to instantiate the client for each request that needs it,
-        # especially if the API key can change or if you want to ensure thread safety
-        # or specific configurations per request.
-        client = openai.OpenAI(api_key=api_key)
-
-        # Make a simple, low-cost API call to test the key
-        client.chat.completions.create(
-            model="gpt-4.1-nano-2025-04-14", # Specified model
-            messages=[{"role": "user", "content": "test"}]
+    Returns HTTP 200 deliberately: htmx does not swap non-2xx responses by
+    default, so a 5xx here would leave the panel silently blank.
+    """
+    if columns:
+        return (
+            f'<tr><td colspan="{columns}" class="text-center text-danger py-3">'
+            f'<i class="fas fa-exclamation-triangle me-2"></i>{message}</td></tr>'
         )
-        return jsonify({'success': True, 'message': 'API key is valid.'})
-    except openai.AuthenticationError:
-        return jsonify({'success': False, 'message': 'API key is invalid or expired.'}), 401
-    except openai.APIError as e:
-        # Handle more specific API errors if needed
-        return jsonify({'success': False, 'message': f'OpenAI API error: {str(e)}'}), 500
-    except Exception as e:
-        # Catch any other unexpected errors
-        logging.error(f"Unexpected error during OpenAI key test: {str(e)}")
-        return jsonify({'success': False, 'message': f'An unexpected error occurred: {str(e)}'}), 500
+    return (
+        f'<div class="alert alert-danger mb-3">'
+        f'<i class="fas fa-exclamation-triangle me-2"></i>{message}</div>'
+    )
 
-@app.route('/get_nonce_to_sign/<wallet_address>')
-def get_nonce_to_sign(wallet_address):
-    if not wallet_address:
-        return jsonify({'error': 'Wallet address is required'}), 400
 
-    # Basic validation for wallet address format (optional but good)
-    if not (wallet_address.startswith('0x') and len(wallet_address) == 42):
-        return jsonify({'error': 'Invalid wallet address format'}), 400
+# ---------------------------------------------------------------------------
+# Presentation helpers
+# ---------------------------------------------------------------------------
 
-    # Generate a more human-readable nonce for signing
-    nonce_bytes = os.urandom(16)
-    nonce = f"Sign this message to log in: {binascii.hexlify(nonce_bytes).decode()}"
-    session[f'nonce_{wallet_address.lower()}'] = nonce # Store nonce with lowercase address
-    logging.info(f"Generated nonce for address {wallet_address}: {nonce}")
-    return jsonify({'nonce': nonce})
+def process_patient_results(resources):
+    """Flatten Patient resources into the shape the table templates expect."""
+    processed = []
+    for resource in resources:
+        address = (resource.get('address') or [{}])[0]
+        telecom = (resource.get('telecom') or [{}])[0]
+        processed.append({
+            'id': resource.get('id', 'Unknown'),
+            'name': patient_display_name(resource),
+            'gender': resource.get('gender', 'Unknown'),
+            'birthDate': resource.get('birthDate', 'Unknown'),
+            'address': format_address(address) or 'Not recorded',
+            'telecom': telecom.get('value', 'Not recorded'),
+        })
+    return processed
 
-@app.route('/verify_signature', methods=['POST'])
-def verify_signature():
-    data = request.json
-    signed_message = data.get('signed_message')
-    original_nonce = data.get('original_nonce')
-    wallet_address = data.get('wallet_address')
 
-    if not all([signed_message, original_nonce, wallet_address]):
-        return jsonify({'success': False, 'error': 'Missing required parameters.'}), 400
+def _bundle_next_link(result):
+    """Extract the `next` page URL from a searchset Bundle, if there is one."""
+    for link in result.data.get('link') or []:
+        if isinstance(link, dict) and link.get('relation') == 'next':
+            return link.get('url')
+    return None
 
-    stored_nonce_key = f'nonce_{wallet_address.lower()}'
-    stored_nonce = session.get(stored_nonce_key)
 
-    if not stored_nonce:
-        logging.warning(f"No nonce found in session for address {wallet_address}")
-        return jsonify({'success': False, 'error': 'Nonce not found in session or session expired.'}), 400
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
-    if original_nonce != stored_nonce:
-        logging.warning(f"Nonce mismatch for address {wallet_address}. Given: {original_nonce}, Stored: {stored_nonce}")
-        return jsonify({'success': False, 'error': 'Nonce mismatch. Possible replay attack.'}), 400
+def register_routes(app):
+    fhir = app.fhir
+    auth_limit = app.config['RATELIMIT_AUTH']
 
-    # Nonce verified, remove from session
-    session.pop(stored_nonce_key, None)
+    # -- shell -------------------------------------------------------------
 
-    try:
-        # Use encode_defunct treating original_nonce as the text that was signed
-        signable_message = encode_defunct(text=original_nonce)
-        recovered_address = Account.recover_message(signable_message, signature=signed_message)
+    @app.route('/')
+    def index():
+        if not current_user.is_authenticated:
+            return redirect(url_for('login'))
+        return render_template('index.html')
 
-        if recovered_address.lower() == wallet_address.lower():
-            user = User(id=wallet_address.lower()) # Use lowercase for consistency
-            login_user(user)
-            logging.info(f"Successfully verified signature for address {wallet_address}. User logged in.")
-            return jsonify({'success': True, 'message': 'Signature verified. User logged in.'})
+    @app.route('/health')
+    def health_check():
+        payload = {'status': 'ok'}
+        if app.config['HEALTH_SHOW_BACKEND']:
+            payload['fhir_server'] = app.config['FHIR_SERVER_URL']
+        return jsonify(payload)
+
+    @app.route('/health/ready')
+    def readiness_check():
+        """Deep check -- verifies the FHIR backend actually answers."""
+        reachable = fhir.capability_ok()
+        return jsonify({'status': 'ok' if reachable else 'degraded',
+                        'fhir_reachable': reachable}), (200 if reachable else 503)
+
+    # -- authentication ----------------------------------------------------
+
+    @app.route('/login')
+    def login():
+        if current_user.is_authenticated:
+            return redirect(url_for('index'))
+        return render_template('login.html')
+
+    @app.route('/get_nonce_to_sign/<wallet_address>')
+    @limiter.limit(auth_limit)
+    def get_nonce_to_sign(wallet_address):
+        if not is_valid_wallet_address(wallet_address):
+            return jsonify({'error': 'Invalid wallet address format.'}), 400
+        nonce = auth.issue_nonce(wallet_address)
+        audit('login.nonce_issued', resource_type='Wallet',
+              resource_id=pseudonymize(wallet_address))
+        return jsonify({'nonce': nonce})
+
+    @app.route('/verify_signature', methods=['POST'])
+    @limiter.limit(auth_limit)
+    def verify_signature():
+        data = request.get_json(silent=True) or {}
+        signature = data.get('signed_message')
+        wallet_address = data.get('wallet_address')
+
+        if not signature or not wallet_address:
+            return jsonify({'success': False,
+                            'error': 'Missing required parameters.'}), 400
+        if not is_valid_wallet_address(wallet_address):
+            return jsonify({'success': False,
+                            'error': 'Invalid wallet address format.'}), 400
+
+        wallet_address = wallet_address.strip().lower()
+        pseudo = pseudonymize(wallet_address)
+
+        # The nonce is taken from the session, never from the request body --
+        # accepting a client-supplied nonce would let a caller replay one.
+        nonce = auth.consume_nonce(wallet_address)
+        if nonce is None:
+            audit('login.denied', outcome='failure', resource_type='Wallet',
+                  resource_id=pseudo, detail={'reason': 'no_pending_nonce'})
+            return jsonify({'success': False,
+                            'error': 'No sign-in challenge is pending. Please try again.'}), 400
+
+        recovered = auth.recover_signer(nonce, signature)
+        if recovered != wallet_address:
+            audit('login.denied', outcome='failure', resource_type='Wallet',
+                  resource_id=pseudo, detail={'reason': 'signature_mismatch'})
+            return jsonify({'success': False,
+                            'error': 'Signature verification failed.'}), 401
+
+        # Signature proves control of the wallet. It does not grant access --
+        # the users table decides that.
+        record = db.get_user(wallet_address) or db.register_pending_user(wallet_address)
+
+        if record['status'] != db.STATUS_ACTIVE:
+            audit('login.denied', outcome='denied', resource_type='Wallet',
+                  resource_id=pseudo, detail={'reason': f"account_{record['status']}"})
+            message = ('This wallet is not yet approved for access. '
+                       'An administrator must activate it.')
+            if record['status'] == db.STATUS_DISABLED:
+                message = 'This account has been disabled.'
+            return jsonify({'success': False, 'error': message}), 403
+
+        login_user(auth.User(record))
+        db.record_login(wallet_address)
+        audit('login.success', resource_type='Wallet', resource_id=pseudo)
+        return jsonify({'success': True, 'message': 'Signed in.'})
+
+    @app.route('/logout')
+    @login_required
+    def logout():
+        audit('logout')
+        logout_user()
+        session.clear()
+        return redirect(url_for('login'))
+
+    # -- patients ----------------------------------------------------------
+
+    @app.route('/fhir/Patients')
+    @login_required
+    def get_patients():
+        page_size = app.config['FHIR_PAGE_SIZE']
+        result = fhir.get('Patient', params={'_count': page_size})
+        if not result.ok:
+            audit('patient.list', outcome='failure')
+            return render_template('patients.html', patients=[], error=result.error,
+                                   total=None, next_url=None)
+
+        audit('patient.list')
+        return render_template(
+            'patients.html',
+            patients=process_patient_results(result.entries),
+            error=None,
+            total=fhir.count('Patient'),
+            next_url=_bundle_next_link(result),
+        )
+
+    @app.route('/fhir/Patients/page')
+    @login_required
+    def get_patients_page():
+        """Follow a Bundle `next` link. The URL is validated against the
+        configured server inside the client, so it cannot be pointed elsewhere."""
+        result = fhir.get_absolute(request.args.get('url', ''))
+        if not result.ok:
+            return _fragment_error(result.error or 'Could not load the next page.', columns=7)
+        audit('patient.list', detail={'page': 'next'})
+        return render_template(
+            'patient_table_body.html',
+            patients=process_patient_results(result.entries),
+            error=None,
+            next_url=_bundle_next_link(result),
+        )
+
+    @app.route('/fhir/search_patients', methods=['POST'])
+    @login_required
+    def search_patients():
+        search_term = (request.form.get('q') or '').strip()
+        page_size = app.config['FHIR_PAGE_SIZE']
+
+        if not search_term:
+            result = fhir.get('Patient', params={'_count': page_size})
         else:
-            logging.warning(f"Signature verification failed for address {wallet_address}. Recovered: {recovered_address.lower()}")
-            return jsonify({'success': False, 'error': 'Signature verification failed.'}), 401
-    except Exception as e: # Catching broad exceptions, consider more specific ones like BadSignature
-        logging.error(f"Error during signature recovery for {wallet_address}: {str(e)}")
-        return jsonify({'success': False, 'error': f'Invalid signature or recovery failed: {str(e)}'}), 400
+            # Search name, identifier and ID together. The previous version only
+            # queried name, so looking up a patient by ID reported "not found".
+            params = {'_count': page_size}
+            if search_term.replace('-', '').isalnum() and any(c.isdigit() for c in search_term):
+                params['_id'] = search_term
+                by_id = fhir.get('Patient', params=params)
+                if by_id.ok and by_id.entries:
+                    audit('patient.search', detail={'mode': 'id'})
+                    return render_template('patient_table_body.html',
+                                           patients=process_patient_results(by_id.entries),
+                                           error=None, next_url=None)
+            result = fhir.get('Patient', params={
+                '_count': page_size, 'name:contains': search_term,
+            })
+            if result.ok and not result.entries:
+                identifier_result = fhir.get('Patient', params={
+                    '_count': page_size, 'identifier': search_term,
+                })
+                if identifier_result.ok and identifier_result.entries:
+                    result = identifier_result
 
-@app.route('/logout')
-@login_required # Ensure user is logged in to log out
-def logout():
-    logout_user()
-    logging.info("User logged out.")
-    return redirect(url_for('index'))
+        if not result.ok:
+            audit('patient.search', outcome='failure')
+            return _fragment_error(result.error or 'Search failed.', columns=7)
 
-@app.route('/login')
-def login():
-    # Show dedicated login page for unauthenticated users
-    if current_user.is_authenticated:
-        return redirect(url_for('index'))
-    return render_template('login.html')
+        audit('patient.search', detail={'has_term': bool(search_term)})
+        return render_template(
+            'patient_table_body.html',
+            patients=process_patient_results(result.entries),
+            error=None,
+            next_url=_bundle_next_link(result),
+        )
+
+    @app.route('/fhir/Patient/<patient_id>')
+    @login_required
+    def get_patient(patient_id):
+        result = fhir.get(f'Patient/{patient_id}')
+        if not result.ok:
+            audit('patient.view', outcome='failure', resource_type='Patient',
+                  resource_id=pseudonymize(patient_id))
+            if result.status_code == 404:
+                return _fragment_error('That patient could not be found.')
+            return _fragment_error(result.error or 'Could not load this patient.')
+
+        patient = result.data
+        patient['display_name'] = patient_display_name(patient)
+        patient['initials'] = patient_initials(patient)
+        patient['age'] = calculate_age(patient.get('birthDate'))
+
+        work_telecoms = [
+            entry['value'] for entry in patient.get('telecom') or []
+            if isinstance(entry, dict) and entry.get('use') == 'work' and entry.get('value')
+        ]
+        any_telecoms = [
+            entry['value'] for entry in patient.get('telecom') or []
+            if isinstance(entry, dict) and entry.get('value')
+        ]
+        patient['contact'] = ', '.join(work_telecoms or any_telecoms) or 'Not recorded'
+
+        addresses = patient.get('address') or []
+        patient['simple_address'] = (
+            format_address(addresses[0]) if addresses else ''
+        ) or 'Not recorded'
+
+        identifiers = patient.get('identifier') or []
+        patient['simple_identifier'] = next(
+            (i.get('value') for i in identifiers if isinstance(i, dict) and i.get('value')),
+            'Not recorded',
+        )
+
+        patient['languages'] = [
+            {
+                'name': first_coding_display(entry.get('language', {})),
+                'preferred': bool(entry.get('preferred')),
+            }
+            for entry in patient.get('communication') or []
+            if isinstance(entry, dict) and first_coding_display(entry.get('language', {}))
+        ]
+
+        patient['marital_status'] = first_coding_display(patient.get('maritalStatus', {}))
+
+        audit('patient.view', resource_type='Patient', resource_id=pseudonymize(patient_id))
+        return render_template('patient_details.html', patient=patient)
+
+    # -- clinical panels ---------------------------------------------------
+
+    @app.route('/fhir/LabResults/<patient_id>')
+    @login_required
+    def get_lab_results(patient_id):
+        result = fhir.get('Observation', params={
+            'patient': patient_id, '_sort': '-date', '_count': 10,
+            'category': 'laboratory',
+        })
+        if not result.ok:
+            audit('patient.labs', outcome='failure', resource_type='Patient',
+                  resource_id=pseudonymize(patient_id))
+            return render_template('lab_results.html', lab_results=[], error=result.error)
+
+        lab_results = []
+        for resource in result.entries:
+            effective = resource.get('effectiveDateTime') or resource.get('issued')
+            value, unit = observation_value(resource)
+            lab_results.append({
+                'date': format_fhir_date(effective),
+                'sort_key': sort_key(effective),
+                'code': observation_code(resource),
+                'value': value if value != '' else 'Not recorded',
+                'unit': unit,
+                'status': resource.get('status', 'unknown'),
+            })
+        lab_results.sort(key=lambda item: item['sort_key'], reverse=True)
+
+        audit('patient.labs', resource_type='Patient', resource_id=pseudonymize(patient_id))
+        return render_template('lab_results.html', lab_results=lab_results, error=None)
+
+    @app.route('/fhir/VitalSigns/<patient_id>')
+    @login_required
+    def get_vital_signs(patient_id):
+        # Four queries, run concurrently rather than one after another.
+        spec = {
+            key: ('Observation', {
+                'patient': patient_id,
+                'code': f'http://loinc.org|{code}',
+                '_sort': '-date',
+                '_count': 10,
+            })
+            for key, (code, _label) in VITAL_SIGN_CODES.items()
+        }
+        results = fhir.get_many(spec)
+
+        vital_signs = []
+        failures = []
+        for key, (_code, label) in VITAL_SIGN_CODES.items():
+            result = results.get(key)
+            if result is None or not result.ok:
+                failures.append(label)
+                continue
+            for resource in result.entries:
+                effective = resource.get('effectiveDateTime') or resource.get('issued')
+                value, unit = observation_value(resource)
+                if value == '':
+                    continue
+                vital_signs.append({
+                    'date': format_fhir_date(effective),
+                    'sort_key': sort_key(effective),
+                    'type': label,
+                    'value': value,
+                    'unit': unit,
+                    'status': resource.get('status', 'unknown'),
+                })
+
+        # Undated readings sort to the bottom rather than masquerading as newest.
+        vital_signs.sort(key=lambda item: item['sort_key'], reverse=True)
+
+        error = None
+        if failures:
+            error = f"Could not load: {', '.join(failures)}."
+            audit('patient.vitals', outcome='failure', resource_type='Patient',
+                  resource_id=pseudonymize(patient_id), detail={'failed': failures})
+        else:
+            audit('patient.vitals', resource_type='Patient',
+                  resource_id=pseudonymize(patient_id))
+
+        return render_template('vital_signs.html', vital_signs=vital_signs, error=error)
+
+    @app.route('/fhir/Medications/<patient_id>')
+    @login_required
+    def get_medications(patient_id):
+        result = fhir.get('MedicationRequest', params={
+            'patient': patient_id, '_count': 20,
+        })
+        if not result.ok:
+            audit('patient.medications', outcome='failure', resource_type='Patient',
+                  resource_id=pseudonymize(patient_id))
+            return render_template('medications.html', medications=[], error=result.error)
+
+        medications = []
+        for resource in result.entries:
+            authored = resource.get('authoredOn')
+            name = 'Unknown medication'
+            if isinstance(resource.get('medicationReference'), dict):
+                name = resource['medicationReference'].get('display') or name
+            elif isinstance(resource.get('medicationCodeableConcept'), dict):
+                name = first_coding_display(resource['medicationCodeableConcept'], fallback=name)
+
+            dosage = [
+                entry['text'] for entry in resource.get('dosageInstruction') or []
+                if isinstance(entry, dict) and entry.get('text')
+            ]
+            medications.append({
+                'date': format_fhir_date(authored),
+                'sort_key': sort_key(authored),
+                'name': name,
+                'dosage': ', '.join(dosage) or 'No specific instructions',
+                'status': resource.get('status', 'unknown'),
+            })
+        medications.sort(key=lambda item: item['sort_key'], reverse=True)
+
+        audit('patient.medications', resource_type='Patient',
+              resource_id=pseudonymize(patient_id))
+        return render_template('medications.html', medications=medications, error=None)
+
+    @app.route('/fhir/Allergies/<patient_id>')
+    @login_required
+    def get_allergies(patient_id):
+        result = fhir.get('AllergyIntolerance', params={
+            'patient': patient_id, '_count': 20,
+        })
+        if not result.ok:
+            # An allergy list that failed to load must never render as "none
+            # recorded" -- that reads as a positive clinical finding.
+            audit('patient.allergies', outcome='failure', resource_type='Patient',
+                  resource_id=pseudonymize(patient_id))
+            return render_template('allergies.html', allergies=[], error=result.error)
+
+        allergies = []
+        for resource in result.entries:
+            recorded = resource.get('recordedDate')
+            reactions = []
+            for reaction in resource.get('reaction') or []:
+                if not isinstance(reaction, dict):
+                    continue
+                for manifestation in reaction.get('manifestation') or []:
+                    label = first_coding_display(manifestation)
+                    if label:
+                        reactions.append(label)
+            allergies.append({
+                'date': format_fhir_date(recorded),
+                'sort_key': sort_key(recorded),
+                'name': first_coding_display(resource.get('code', {}),
+                                             fallback='Unknown allergen'),
+                'reactions': reactions,
+                'severity': resource.get('criticality') or resource.get('severity') or 'unknown',
+                'status': first_coding_display(resource.get('clinicalStatus', {}),
+                                               fallback='Unknown'),
+            })
+        allergies.sort(key=lambda item: item['sort_key'], reverse=True)
+
+        audit('patient.allergies', resource_type='Patient',
+              resource_id=pseudonymize(patient_id))
+        return render_template('allergies.html', allergies=allergies, error=None)
+
+    # -- aggregate views ---------------------------------------------------
+
+    @app.route('/fhir/Demographics')
+    @login_required
+    def get_demographics():
+        result = fhir.get('Patient', params={'_count': 100})
+        if not result.ok:
+            audit('demographics.view', outcome='failure')
+            return _fragment_error(result.error or 'Could not load demographics.')
+
+        gender_counts = {'male': 0, 'female': 0, 'other': 0, 'unknown': 0}
+        age_groups = {'0-18': 0, '19-35': 0, '36-55': 0, '56-75': 0, '76+': 0, 'unknown': 0}
+        ages = []
+
+        for resource in result.entries:
+            gender = (resource.get('gender') or '').lower()
+            gender_counts[gender if gender in gender_counts else 'unknown'] += 1
+
+            age = calculate_age(resource.get('birthDate'))
+            if age is None or age < 0:
+                age_groups['unknown'] += 1
+                continue
+            ages.append(age)
+            if age <= 18:
+                age_groups['0-18'] += 1
+            elif age <= 35:
+                age_groups['19-35'] += 1
+            elif age <= 55:
+                age_groups['36-55'] += 1
+            elif age <= 75:
+                age_groups['56-75'] += 1
+            else:
+                age_groups['76+'] += 1
+
+        sampled = sum(gender_counts.values())
+        demographics = {
+            'gender_counts': gender_counts,
+            'age_groups': age_groups,
+            'total_patients': sampled,
+            'server_total': fhir.count('Patient'),
+            # Reported from the sample rather than hardcoded to "36-55".
+            'mean_age': round(sum(ages) / len(ages), 1) if ages else None,
+        }
+
+        audit('demographics.view')
+        return render_template('demographics.html', demographics=demographics)
+
+    @app.route('/fhir/Dashboard')
+    @login_required
+    def get_dashboard():
+        results = fhir.get_many({
+            'patients': ('Patient', {'_count': 20}),
+            'patient_count': ('Patient', {'_summary': 'count'}),
+            'observation_count': ('Observation', {'_summary': 'count'}),
+        })
+
+        patients_result = results['patients']
+        gender_counts = {'male': 0, 'female': 0, 'other': 0, 'unknown': 0}
+        recent_patients = []
+        sampled = 0
+
+        if patients_result.ok:
+            for resource in patients_result.entries:
+                gender = (resource.get('gender') or '').lower()
+                gender_counts[gender if gender in gender_counts else 'unknown'] += 1
+                sampled += 1
+            recent_patients = process_patient_results(patients_result.entries[:5])
+
+        # The real population, not the size of one page.
+        patient_total = results['patient_count'].total
+        observation_total = results['observation_count'].total
+
+        audit('dashboard.view')
+        return render_template(
+            'dashboard.html',
+            patient_count=patient_total,
+            observation_count=observation_total,
+            sampled_count=sampled,
+            gender_counts=gender_counts,
+            recent_patients=recent_patients,
+            fhir_server_url=app.config['FHIR_SERVER_URL'],
+            fhir_reachable=patients_result.ok,
+            error=None if patients_result.ok else patients_result.error,
+        )
+
+    # -- settings ----------------------------------------------------------
+
+    @app.route('/settings/ai')
+    @login_required
+    def ai_settings():
+        return render_template('ai_settings.html')
+
+    @app.route('/test_openai_key', methods=['POST'])
+    @login_required
+    @limiter.limit('5 per minute')
+    def test_openai_key():
+        api_key = (request.get_json(silent=True) or {}).get('api_key')
+        if not api_key:
+            return jsonify({'success': False, 'message': 'An API key is required.'}), 400
+
+        try:
+            import openai
+        except ImportError:
+            return jsonify({'success': False,
+                            'message': 'The openai package is not installed.'}), 500
+
+        try:
+            openai.OpenAI(api_key=api_key).models.list()
+        except openai.AuthenticationError:
+            return jsonify({'success': False,
+                            'message': 'That key was rejected as invalid or expired.'}), 401
+        except openai.APIError as exc:
+            logger.warning('OpenAI key test failed: %s', type(exc).__name__)
+            return jsonify({'success': False,
+                            'message': 'The AI provider returned an error.'}), 502
+        except Exception:
+            logger.exception('Unexpected error testing the OpenAI key')
+            return jsonify({'success': False,
+                            'message': 'The key could not be checked. Try again.'}), 500
+
+        audit('settings.ai_key_tested')
+        return jsonify({'success': True, 'message': 'Key accepted.'})
+
+    # -- administration ----------------------------------------------------
+
+    @app.route('/admin/users')
+    @login_required
+    @auth.require_role(db.ROLE_ADMIN)
+    def admin_users():
+        return render_template('admin_users.html', users=db.list_users())
+
+    @app.route('/admin/users/<wallet_address>/status', methods=['POST'])
+    @login_required
+    @auth.require_role(db.ROLE_ADMIN)
+    def admin_set_user_status(wallet_address):
+        status = request.form.get('status', '')
+        if status not in (db.STATUS_PENDING, db.STATUS_ACTIVE, db.STATUS_DISABLED):
+            abort(400)
+        if wallet_address.lower() == current_user.wallet_address and status != db.STATUS_ACTIVE:
+            return _fragment_error('You cannot disable your own account.')
+
+        db.set_user_status(wallet_address, status)
+        audit('admin.user_status_changed', resource_type='User',
+              resource_id=pseudonymize(wallet_address), detail={'status': status})
+        return render_template('admin_user_rows.html', users=db.list_users())
+
+    @app.route('/admin/users/<wallet_address>/role', methods=['POST'])
+    @login_required
+    @auth.require_role(db.ROLE_ADMIN)
+    def admin_set_user_role(wallet_address):
+        role = request.form.get('role', '')
+        if role not in db.ROLES:
+            abort(400)
+        if wallet_address.lower() == current_user.wallet_address and role != db.ROLE_ADMIN:
+            return _fragment_error('You cannot remove your own administrator role.')
+
+        db.set_user_role(wallet_address, role)
+        audit('admin.user_role_changed', resource_type='User',
+              resource_id=pseudonymize(wallet_address), detail={'role': role})
+        return render_template('admin_user_rows.html', users=db.list_users())
+
+    @app.route('/admin/audit')
+    @login_required
+    @auth.require_role(db.ROLE_ADMIN)
+    def admin_audit():
+        audit('admin.audit_viewed')
+        return render_template('admin_audit.html', entries=db.read_audit(limit=200))
+
+    # -- error handling ----------------------------------------------------
+
+    @app.errorhandler(403)
+    def handle_forbidden(_error):
+        if request.headers.get('HX-Request'):
+            return _fragment_error('You do not have permission to view this.'), 403
+        return render_template('error.html', code=403,
+                               message='You do not have permission to view this.'), 403
+
+    @app.errorhandler(404)
+    def handle_not_found(_error):
+        if request.headers.get('HX-Request'):
+            return _fragment_error('Not found.'), 404
+        return render_template('error.html', code=404,
+                               message='That page could not be found.'), 404
+
+    @app.errorhandler(500)
+    def handle_server_error(error):
+        logger.exception('Unhandled error: %s', error)
+        if request.headers.get('HX-Request'):
+            return _fragment_error('Something went wrong loading this section.'), 500
+        return render_template('error.html', code=500,
+                               message='Something went wrong.'), 500
+
+
+# ---------------------------------------------------------------------------
+
+def register_cli(app):
+    """Operator commands, including the lockout recovery path."""
+
+    @app.cli.command('grant-admin')
+    @click.argument('wallet_address')
+    def grant_admin_command(wallet_address):
+        """Make WALLET_ADDRESS an active administrator."""
+        if not is_valid_wallet_address(wallet_address):
+            raise click.ClickException(
+                f'{wallet_address!r} is not a usable wallet address. It must be '
+                '0x followed by 40 hex digits, and cannot be the zero address.'
+            )
+        record = db.grant_admin(wallet_address)
+        db.write_audit('admin.granted_via_cli', 'success',
+                       actor='cli', resource_type='User',
+                       resource_id=pseudonymize(record['wallet_address']))
+        click.echo(f"{record['wallet_address']} is now an active administrator.")
+
+    @app.cli.command('list-users')
+    def list_users_command():
+        """Show every registered account and its status."""
+        users = db.list_users()
+        if not users:
+            click.echo('No users registered yet.')
+            return
+        click.echo(f"{'WALLET':<44}{'ROLE':<12}{'STATUS':<10}LAST SIGN-IN")
+        for user in users:
+            click.echo(
+                f"{user['wallet_address']:<44}{user['role']:<12}"
+                f"{user['status']:<10}{(user['last_login_at'] or 'never')[:19]}"
+            )
+        click.echo(f'\n{db.count_active_admins()} active administrator(s).')
+
+
+def main():
+    try:
+        application = create_app()
+    except ConfigError as exc:
+        raise SystemExit(f'\nConfiguration error:\n{exc}\n')
+    application.run(debug=application.config['DEBUG'])
+
 
 if __name__ == '__main__':
-    debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    app.run(debug=debug_mode)
+    main()

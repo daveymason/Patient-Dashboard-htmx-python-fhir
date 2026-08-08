@@ -1,0 +1,52 @@
+{% for user in users %}
+<tr>
+    <td class="font-monospace small">{{ user.wallet_address }}</td>
+    <td>
+        <form class="d-inline"
+              hx-post="{{ url_for('admin_set_user_role', wallet_address=user.wallet_address) }}"
+              hx-target="#admin-user-rows"
+              hx-swap="innerHTML">
+            <select name="role" class="form-select form-select-sm d-inline-block w-auto"
+                    onchange="this.form.requestSubmit ? htmx.trigger(this.form, 'submit') : null"
+                    aria-label="Role for {{ user.wallet_address }}">
+                {% for role in ['admin', 'clinician', 'viewer'] %}
+                <option value="{{ role }}" {% if user.role == role %}selected{% endif %}>{{ role|capitalize }}</option>
+                {% endfor %}
+            </select>
+        </form>
+    </td>
+    <td>
+        <span class="badge rounded-pill
+            {% if user.status == 'active' %}bg-success
+            {% elif user.status == 'pending' %}bg-warning text-dark
+            {% else %}bg-secondary{% endif %}">
+            {{ user.status|capitalize }}
+        </span>
+    </td>
+    <td class="small text-muted">{{ user.created_at[:10] if user.created_at else '' }}</td>
+    <td class="small text-muted">{{ user.last_login_at[:10] if user.last_login_at else 'Never' }}</td>
+    <td>
+        {% if user.status != 'active' %}
+        <button class="btn btn-sm btn-success"
+                hx-post="{{ url_for('admin_set_user_status', wallet_address=user.wallet_address) }}"
+                hx-vals='{"status": "active"}'
+                hx-target="#admin-user-rows"
+                hx-swap="innerHTML">
+            Activate
+        </button>
+        {% endif %}
+        {% if user.status != 'disabled' %}
+        <button class="btn btn-sm btn-outline-danger"
+                hx-post="{{ url_for('admin_set_user_status', wallet_address=user.wallet_address) }}"
+                hx-vals='{"status": "disabled"}'
+                hx-target="#admin-user-rows"
+                hx-swap="innerHTML"
+                hx-confirm="Disable {{ user.wallet_address }}? They will lose access immediately.">
+            Disable
+        </button>
+        {% endif %}
+    </td>
+</tr>
+{% else %}
+<tr><td colspan="6" class="text-center text-muted py-3">No users registered yet.</td></tr>
+{% endfor %}

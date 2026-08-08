@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Audit Log &mdash; FHIR Patient Dashboard{% endblock %}
+
+{% block content %}
+<h2 class="text-primary mb-4"><i class="fas fa-clipboard-check"></i> Audit Log</h2>
+
+<p class="text-muted">
+    Most recent 200 entries. Patient and wallet identifiers are stored as
+    salted digests, so one subject can be followed across entries without the
+    log itself holding an identifier. The table is append-only &mdash; entries
+    cannot be edited or removed.
+</p>
+
+<div class="table-responsive">
+    <table class="table table-sm table-striped">
+        <thead class="table-dark">
+            <tr>
+                <th>When</th>
+                <th>Actor</th>
+                <th>Action</th>
+                <th>Subject</th>
+                <th>Outcome</th>
+                <th>Source</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in entries %}
+            <tr>
+                <td class="small font-monospace">{{ entry.occurred_at[:19]|replace('T', ' ') }}</td>
+                <td class="small font-monospace">
+                    {% if entry.actor %}{{ entry.actor[:10] }}&hellip;{% else %}&mdash;{% endif %}
+                </td>
+                <td class="small">{{ entry.action }}</td>
+                <td class="small font-monospace">{{ entry.resource_id or '—' }}</td>
+                <td>
+                    <span class="badge rounded-pill
+                        {% if entry.outcome == 'success' %}bg-success
+                        {% elif entry.outcome == 'denied' %}bg-warning text-dark
+                        {% else %}bg-danger{% endif %}">
+                        {{ entry.outcome }}
+                    </span>
+                </td>
+                <td class="small text-muted">{{ entry.remote_addr or '—' }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6" class="text-center text-muted py-3">No audit entries yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

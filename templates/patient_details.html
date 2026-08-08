@@ -3,19 +3,22 @@
     <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
         <span><i class="fas fa-id-card me-2"></i>ID: {{ patient['id'] }}</span>
         <span class="badge rounded-pill" style="background-color: var(--tropical-secondary);">
-            {{ patient['gender']|capitalize }}
+            {{ (patient['gender'] or 'Unknown')|capitalize }}
         </span>
     </div>
     <div class="card-body">
         <div class="row">
             <div class="col-md-8">
-                <h5 class="card-title mb-3 fw-bold">{{ patient['name'][0]['given'][0] }} {{ patient['name'][0]['family'] }}</h5>
+                <h5 class="card-title mb-3 fw-bold">{{ patient['display_name'] }}</h5>
                 <div class="mb-3 p-3 rounded" style="background-color: var(--tropical-light);">
                     <div class="row mb-2">
                         <div class="col-md-4 fw-bold">
                             <i class="fas fa-birthday-cake text-primary me-2"></i>Birth Date:
                         </div>
-                        <div class="col-md-8">{{ patient['birthDate'] }} {% if patient.get('age') %}({{ patient['age'] }} years){% endif %}</div>
+                        <div class="col-md-8">
+                            {{ patient['birthDate'] or 'Not recorded' }}
+                            {% if patient['age'] is not none %}({{ patient['age'] }} years){% endif %}
+                        </div>
                     </div>
                     <div class="row mb-2">
                         <div class="col-md-4 fw-bold">
@@ -33,29 +36,25 @@
                         <div class="col-md-4 fw-bold">
                             <i class="fas fa-phone text-primary me-2"></i>Contact:
                         </div>
-                        <div class="col-md-8">{{ patient['work_phone'] }}</div>
+                        <div class="col-md-8">{{ patient['contact'] }}</div>
                     </div>
                     <div class="row mb-2">
                         <div class="col-md-4 fw-bold">
                             <i class="fas fa-hospital text-primary me-2"></i>Organization:
                         </div>
-                        <div class="col-md-8">{{ patient.get('managingOrganization', {}).get('display', 'N/A') }}</div>
+                        <div class="col-md-8">
+                            {{ patient.get('managingOrganization', {}).get('display', 'Not recorded') }}
+                        </div>
                     </div>
-                    {% if patient.get('maritalStatus', {}).get('text') or patient.get('maritalStatus', {}).get('coding') %}
+                    {% if patient['marital_status'] %}
                     <div class="row mb-2">
                         <div class="col-md-4 fw-bold">
                             <i class="fas fa-heart text-primary me-2"></i>Marital Status:
                         </div>
-                        <div class="col-md-8">
-                            {% if patient.get('maritalStatus', {}).get('text') %}
-                                {{ patient['maritalStatus']['text'] }}
-                            {% elif patient.get('maritalStatus', {}).get('coding') %}
-                                {{ patient['maritalStatus']['coding'][0].get('display', 'Unknown') }}
-                            {% endif %}
-                        </div>
+                        <div class="col-md-8">{{ patient['marital_status'] }}</div>
                     </div>
                     {% endif %}
-                    {% if patient.get('languages') %}
+                    {% if patient['languages'] %}
                     <div class="row mb-2">
                         <div class="col-md-4 fw-bold">
                             <i class="fas fa-language text-primary me-2"></i>Languages:
@@ -63,7 +62,7 @@
                         <div class="col-md-8">
                             {% for language in patient['languages'] %}
                                 <span class="badge rounded-pill {% if language.preferred %}bg-success{% else %}bg-secondary{% endif %} me-1">
-                                    {{ language.name }} {% if language.preferred %}(Preferred){% endif %}
+                                    {{ language.name }}{% if language.preferred %} (Preferred){% endif %}
                                 </span>
                             {% endfor %}
                         </div>
@@ -72,13 +71,13 @@
                     {% if patient.get('deceasedBoolean') or patient.get('deceasedDateTime') %}
                     <div class="row mb-2">
                         <div class="col-md-4 fw-bold">
-                            <i class="fas fa-skull text-danger me-2"></i>Deceased:
+                            <i class="fas fa-info-circle text-danger me-2"></i>Deceased:
                         </div>
                         <div class="col-md-8">
-                            {% if patient.get('deceasedBoolean') %}
-                                Yes
-                            {% elif patient.get('deceasedDateTime') %}
+                            {% if patient.get('deceasedDateTime') %}
                                 Yes, on {{ patient['deceasedDateTime']|replace('T', ' at ')|replace('Z', '') }}
+                            {% else %}
+                                Yes
                             {% endif %}
                         </div>
                     </div>
@@ -87,19 +86,14 @@
             </div>
             <div class="col-md-4 text-center">
                 <div class="avatar-circle mb-3 mx-auto d-flex align-items-center justify-content-center">
-                    <span class="initials">{{ patient['name'][0]['given'][0][0] }}{{ patient['name'][0]['family'][0] }}</span>
+                    <span class="initials">{{ patient['initials'] }}</span>
                 </div>
                 <div class="d-grid gap-2">
-                    <button class="btn btn-primary position-relative" 
-                            hx-get="/fhir/Patients" 
+                    <button class="btn btn-primary"
+                            hx-get="/fhir/Patients"
                             hx-target="#content"
-                            hx-indicator="this"
                             hx-swap="innerHTML transition:true">
-                        <span><i class="fas fa-arrow-left"></i> Back to Patients</span>
-                        <span class="htmx-indicator position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger">
-                            <span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-                            <span class="visually-hidden">Loading...</span>
-                        </span>
+                        <i class="fas fa-arrow-left"></i> Back to Patients
                     </button>
                 </div>
             </div>
@@ -114,10 +108,9 @@
                 <i class="fas fa-vial me-2"></i> Lab Results
             </div>
             <div class="card-body">
-                <button class="btn btn-outline-primary mb-3 w-100" 
-                        hx-get="/fhir/LabResults/{{ patient['id'] }}" 
-                        hx-target="#labResults" 
-                        hx-trigger="click" 
+                <button class="btn btn-outline-primary mb-3 w-100"
+                        hx-get="/fhir/LabResults/{{ patient['id'] }}"
+                        hx-target="#labResults"
                         hx-indicator="#lab-results-loader">
                     <i class="fas fa-vial me-2"></i> View Lab Results
                 </button>
@@ -138,9 +131,9 @@
                 <i class="fas fa-chart-line me-2"></i> Vital Signs
             </div>
             <div class="card-body">
-                <button class="btn btn-outline-primary mb-3 w-100" 
-                        hx-get="/fhir/VitalSigns/{{ patient['id'] }}" 
-                        hx-target="#vitalSigns" 
+                <button class="btn btn-outline-primary mb-3 w-100"
+                        hx-get="/fhir/VitalSigns/{{ patient['id'] }}"
+                        hx-target="#vitalSigns"
                         hx-indicator="#vital-signs-loader">
                     <i class="fas fa-heartbeat me-2"></i> View Vital Signs
                 </button>
@@ -164,9 +157,9 @@
                 <i class="fas fa-pills me-2"></i> Medications
             </div>
             <div class="card-body">
-                <button class="btn btn-outline-primary mb-3 w-100" 
-                        hx-get="/fhir/Medications/{{ patient['id'] }}" 
-                        hx-target="#medications" 
+                <button class="btn btn-outline-primary mb-3 w-100"
+                        hx-get="/fhir/Medications/{{ patient['id'] }}"
+                        hx-target="#medications"
                         hx-indicator="#medications-loader">
                     <i class="fas fa-prescription-bottle-alt me-2"></i> View Medications
                 </button>
@@ -187,9 +180,9 @@
                 <i class="fas fa-allergies me-2"></i> Allergies
             </div>
             <div class="card-body">
-                <button class="btn btn-outline-primary mb-3 w-100" 
-                        hx-get="/fhir/Allergies/{{ patient['id'] }}" 
-                        hx-target="#allergies" 
+                <button class="btn btn-outline-primary mb-3 w-100"
+                        hx-get="/fhir/Allergies/{{ patient['id'] }}"
+                        hx-target="#allergies"
                         hx-indicator="#allergies-loader">
                     <i class="fas fa-exclamation-triangle me-2"></i> View Allergies
                 </button>
@@ -214,7 +207,7 @@
         border-radius: 50%;
         color: white;
     }
-    
+
     .initials {
         font-size: 60px;
         font-weight: bold;

@@ -1,34 +1,19 @@
-<div class="dashboard-loader htmx-indicator" id="dashboard-loader">
-    <div class="loading-card">
-        <div class="spinner-container">
-            <div class="spinner-border text-primary" role="status"></div>
-        </div>
-        <h4 class="mt-3 mb-4 text-center">Loading Dashboard</h4>
-        <div class="progress mb-3" style="height: 10px;">
-            <div class="progress-bar progress-bar-striped progress-bar-animated" id="dashboard-progress"></div>
-        </div>
-        <div class="loading-steps">
-            <div class="loading-step active" id="step1">
-                <i class="fas fa-users"></i> Loading patient data...
-            </div>
-            <div class="loading-step" id="step2">
-                <i class="fas fa-clipboard-list"></i> Loading observations...
-            </div>
-            <div class="loading-step" id="step3">
-                <i class="fas fa-chart-pie"></i> Processing statistics...
-            </div>
-            <div class="loading-step" id="step4">
-                <i class="fas fa-check-circle"></i> Finalizing dashboard...
-            </div>
-        </div>
-    </div>
-</div>
+{% macro pct(count, total) -%}
+{%- if total and total > 0 -%}{{ "%.1f"|format(count / total * 100) }}%{%- else -%}&ndash;{%- endif -%}
+{%- endmacro %}
 
 <div class="row">
     <div class="col-12">
         <h2 class="text-primary mb-4"><i class="fas fa-chart-bar"></i> Dashboard</h2>
     </div>
 </div>
+
+{% if error %}
+<div class="alert alert-danger">
+    <i class="fas fa-exclamation-triangle me-2"></i>
+    <strong>Dashboard data is incomplete.</strong> {{ error }}
+</div>
+{% endif %}
 
 <div class="row">
     <div class="col-md-4 mb-4">
@@ -39,7 +24,9 @@
                         <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">
                             Patients
                         </div>
-                        <div class="h5 mb-0 font-weight-bold text-gray-800">{{ patient_count }}</div>
+                        <div class="h5 mb-0 font-weight-bold text-gray-800">
+                            {% if patient_count is not none %}{{ patient_count }}{% else %}&ndash;{% endif %}
+                        </div>
                     </div>
                     <div class="col-auto">
                         <i class="fas fa-users fa-2x text-gray-300"></i>
@@ -53,7 +40,7 @@
             </div>
         </div>
     </div>
-    
+
     <div class="col-md-4 mb-4">
         <div class="card border-left-success h-100">
             <div class="card-body">
@@ -62,7 +49,9 @@
                         <div class="text-xs font-weight-bold text-success text-uppercase mb-1">
                             Observations
                         </div>
-                        <div class="h5 mb-0 font-weight-bold text-gray-800">{{ observation_count }}</div>
+                        <div class="h5 mb-0 font-weight-bold text-gray-800">
+                            {% if observation_count is not none %}{{ observation_count }}{% else %}&ndash;{% endif %}
+                        </div>
                     </div>
                     <div class="col-auto">
                         <i class="fas fa-clipboard-list fa-2x text-gray-300"></i>
@@ -76,16 +65,18 @@
             </div>
         </div>
     </div>
-    
+
     <div class="col-md-4 mb-4">
         <div class="card border-left-info h-100">
             <div class="card-body">
                 <div class="row no-gutters align-items-center">
                     <div class="col mr-2">
                         <div class="text-xs font-weight-bold text-info text-uppercase mb-1">
-                            Server Status
+                            Record Server
                         </div>
-                        <div class="h5 mb-0 font-weight-bold text-success">Active</div>
+                        <div class="h5 mb-0 font-weight-bold {% if fhir_reachable %}text-success{% else %}text-danger{% endif %}">
+                            {% if fhir_reachable %}Reachable{% else %}Unreachable{% endif %}
+                        </div>
                     </div>
                     <div class="col-auto">
                         <i class="fas fa-server fa-2x text-gray-300"></i>
@@ -93,7 +84,7 @@
                 </div>
             </div>
             <div class="card-footer bg-light">
-                <a href="{{ fhir_server_url }}" class="text-decoration-none" target="_blank">
+                <a href="{{ fhir_server_url }}" class="text-decoration-none" target="_blank" rel="noopener noreferrer">
                     <i class="fas fa-external-link-alt"></i> FHIR Server
                 </a>
             </div>
@@ -109,27 +100,25 @@
             </div>
             <div class="card-body">
                 <div class="table-responsive">
-                    <table class="table table-sm">
+                    <table class="table table-sm mb-0">
                         <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Name</th>
-                                <th>Action</th>
-                            </tr>
+                            <tr><th>ID</th><th>Name</th><th>Action</th></tr>
                         </thead>
                         <tbody>
                             {% for patient in recent_patients %}
                             <tr>
-                                <td>{{ patient.id }}</td>
+                                <td class="font-monospace small">{{ patient.id }}</td>
                                 <td>{{ patient.name }}</td>
                                 <td>
-                                    <button class="btn btn-sm btn-outline-primary" 
-                                            hx-get="/fhir/Patient/{{ patient.id }}" 
+                                    <button class="btn btn-sm btn-outline-primary"
+                                            hx-get="/fhir/Patient/{{ patient.id }}"
                                             hx-target="#content">
                                         View
                                     </button>
                                 </td>
                             </tr>
+                            {% else %}
+                            <tr><td colspan="3" class="text-muted text-center py-3">No patients to show</td></tr>
                             {% endfor %}
                         </tbody>
                     </table>
@@ -137,43 +126,29 @@
             </div>
         </div>
     </div>
-    
+
     <div class="col-md-6 mb-4">
         <div class="card shadow">
             <div class="card-header bg-primary text-white">
-                <h6 class="m-0 font-weight-bold">Gender Distribution</h6>
+                <h6 class="m-0 font-weight-bold">
+                    Gender Distribution
+                    <small class="fw-normal">(sample of {{ sampled_count }})</small>
+                </h6>
             </div>
             <div class="card-body">
                 <div class="table-responsive">
-                    <table class="table table-sm">
+                    <table class="table table-sm mb-0">
                         <thead>
-                            <tr>
-                                <th>Gender</th>
-                                <th>Count</th>
-                                <th>Percentage</th>
-                            </tr>
+                            <tr><th>Gender</th><th>Count</th><th>Percentage</th></tr>
                         </thead>
                         <tbody>
+                            {% for label, key in [('Male', 'male'), ('Female', 'female'), ('Other', 'other'), ('Unknown', 'unknown')] %}
                             <tr>
-                                <td>Male</td>
-                                <td>{{ gender_counts.male }}</td>
-                                <td>{{ "%.1f"|format(gender_counts.male / patient_count * 100 if patient_count else 0) }}%</td>
+                                <td>{{ label }}</td>
+                                <td>{{ gender_counts[key] }}</td>
+                                <td>{{ pct(gender_counts[key], sampled_count) }}</td>
                             </tr>
-                            <tr>
-                                <td>Female</td>
-                                <td>{{ gender_counts.female }}</td>
-                                <td>{{ "%.1f"|format(gender_counts.female / patient_count * 100 if patient_count else 0) }}%</td>
-                            </tr>
-                            <tr>
-                                <td>Other</td>
-                                <td>{{ gender_counts.other }}</td>
-                                <td>{{ "%.1f"|format(gender_counts.other / patient_count * 100 if patient_count else 0) }}%</td>
-                            </tr>
-                            <tr>
-                                <td>Unknown</td>
-                                <td>{{ gender_counts.unknown }}</td>
-                                <td>{{ "%.1f"|format(gender_counts.unknown / patient_count * 100 if patient_count else 0) }}%</td>
-                            </tr>
+                            {% endfor %}
                         </tbody>
                     </table>
                 </div>

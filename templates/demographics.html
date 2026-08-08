@@ -1,5 +1,19 @@
+{% macro pct(count, total) -%}
+{%- if total and total > 0 -%}{{ "%.1f"|format(count / total * 100) }}%{%- else -%}&ndash;{%- endif -%}
+{%- endmacro %}
+
 <h2 class="text-primary"><i class="fas fa-chart-pie"></i> Patient Demographics</h2>
 
+<p class="text-muted">
+    Based on a sample of {{ demographics.total_patients }} patients
+    {%- if demographics.server_total %} of {{ demographics.server_total }} on the record server{% endif %}.
+</p>
+
+{% if demographics.total_patients == 0 %}
+<div class="alert alert-info">
+    <i class="fas fa-info-circle me-2"></i> No patient records were returned, so there is nothing to summarise.
+</div>
+{% else %}
 <div class="row mt-4">
     <div class="col-md-6">
         <div class="card mb-3">
@@ -7,35 +21,18 @@
                 <i class="fas fa-venus-mars"></i> Gender Distribution
             </div>
             <div class="card-body">
-                <table class="table table-sm">
+                <table class="table table-sm mb-0">
                     <thead>
-                        <tr>
-                            <th>Gender</th>
-                            <th>Count</th>
-                            <th>Percentage</th>
-                        </tr>
+                        <tr><th>Gender</th><th>Count</th><th>Percentage</th></tr>
                     </thead>
                     <tbody>
+                        {% for label, key in [('Male', 'male'), ('Female', 'female'), ('Other', 'other'), ('Unknown', 'unknown')] %}
                         <tr>
-                            <td>Male</td>
-                            <td>{{ demographics.gender_counts.male }}</td>
-                            <td>{{ "%.1f"|format(demographics.gender_counts.male / demographics.total_patients * 100) }}%</td>
+                            <td>{{ label }}</td>
+                            <td>{{ demographics.gender_counts[key] }}</td>
+                            <td>{{ pct(demographics.gender_counts[key], demographics.total_patients) }}</td>
                         </tr>
-                        <tr>
-                            <td>Female</td>
-                            <td>{{ demographics.gender_counts.female }}</td>
-                            <td>{{ "%.1f"|format(demographics.gender_counts.female / demographics.total_patients * 100) }}%</td>
-                        </tr>
-                        <tr>
-                            <td>Other</td>
-                            <td>{{ demographics.gender_counts.other }}</td>
-                            <td>{{ "%.1f"|format(demographics.gender_counts.other / demographics.total_patients * 100) }}%</td>
-                        </tr>
-                        <tr>
-                            <td>Unknown</td>
-                            <td>{{ demographics.gender_counts.unknown }}</td>
-                            <td>{{ "%.1f"|format(demographics.gender_counts.unknown / demographics.total_patients * 100) }}%</td>
-                        </tr>
+                        {% endfor %}
                     </tbody>
                 </table>
             </div>
@@ -47,45 +44,18 @@
                 <i class="fas fa-users"></i> Age Distribution
             </div>
             <div class="card-body">
-                <table class="table table-sm">
+                <table class="table table-sm mb-0">
                     <thead>
-                        <tr>
-                            <th>Age Group</th>
-                            <th>Count</th>
-                            <th>Percentage</th>
-                        </tr>
+                        <tr><th>Age Group</th><th>Count</th><th>Percentage</th></tr>
                     </thead>
                     <tbody>
+                        {% for key in ['0-18', '19-35', '36-55', '56-75', '76+', 'unknown'] %}
                         <tr>
-                            <td>0-18</td>
-                            <td>{{ demographics.age_groups['0-18'] }}</td>
-                            <td>{{ "%.1f"|format(demographics.age_groups['0-18'] / demographics.total_patients * 100) }}%</td>
+                            <td>{{ 'Unknown' if key == 'unknown' else key }}</td>
+                            <td>{{ demographics.age_groups[key] }}</td>
+                            <td>{{ pct(demographics.age_groups[key], demographics.total_patients) }}</td>
                         </tr>
-                        <tr>
-                            <td>19-35</td>
-                            <td>{{ demographics.age_groups['19-35'] }}</td>
-                            <td>{{ "%.1f"|format(demographics.age_groups['19-35'] / demographics.total_patients * 100) }}%</td>
-                        </tr>
-                        <tr>
-                            <td>36-55</td>
-                            <td>{{ demographics.age_groups['36-55'] }}</td>
-                            <td>{{ "%.1f"|format(demographics.age_groups['36-55'] / demographics.total_patients * 100) }}%</td>
-                        </tr>
-                        <tr>
-                            <td>56-75</td>
-                            <td>{{ demographics.age_groups['56-75'] }}</td>
-                            <td>{{ "%.1f"|format(demographics.age_groups['56-75'] / demographics.total_patients * 100) }}%</td>
-                        </tr>
-                        <tr>
-                            <td>76+</td>
-                            <td>{{ demographics.age_groups['76+'] }}</td>
-                            <td>{{ "%.1f"|format(demographics.age_groups['76+'] / demographics.total_patients * 100) }}%</td>
-                        </tr>
-                        <tr>
-                            <td>Unknown</td>
-                            <td>{{ demographics.age_groups.unknown }}</td>
-                            <td>{{ "%.1f"|format(demographics.age_groups.unknown / demographics.total_patients * 100) }}%</td>
-                        </tr>
+                        {% endfor %}
                     </tbody>
                 </table>
             </div>
@@ -102,7 +72,7 @@
             <div class="col-md-4 text-center">
                 <div class="card">
                     <div class="card-body">
-                        <h5 class="card-title">Total Patients</h5>
+                        <h5 class="card-title">Patients Sampled</h5>
                         <p class="card-text display-4">{{ demographics.total_patients }}</p>
                     </div>
                 </div>
@@ -115,7 +85,7 @@
                             {% if demographics.gender_counts.female > 0 %}
                             {{ "%.1f"|format(demographics.gender_counts.male / demographics.gender_counts.female) }} : 1
                             {% else %}
-                            N/A
+                            &ndash;
                             {% endif %}
                         </p>
                     </div>
@@ -124,12 +94,12 @@
             <div class="col-md-4 text-center">
                 <div class="card">
                     <div class="card-body">
-                        <h5 class="card-title">Average Age Group</h5>
+                        <h5 class="card-title">Mean Age</h5>
                         <p class="card-text display-4">
-                            {% if demographics.total_patients > 0 %}
-                            36-55
+                            {% if demographics.mean_age is not none %}
+                            {{ demographics.mean_age }}
                             {% else %}
-                            N/A
+                            &ndash;
                             {% endif %}
                         </p>
                     </div>
@@ -143,3 +113,4 @@
         </button>
     </div>
 </div>
+{% endif %}
