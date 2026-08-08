@@ -102,6 +102,29 @@
 </div>
 
 <div class="row mt-4">
+    <div class="col-12">
+        <div class="card border-primary">
+            <div class="card-header bg-primary text-white">
+                <i class="fas fa-notes-medical me-2"></i> Conditions / Problem List
+            </div>
+            <div class="card-body">
+                <div id="conditions-loader" class="htmx-indicator">
+                    <div class="d-flex justify-content-center my-3">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading conditions...</span>
+                        </div>
+                    </div>
+                </div>
+                <div id="conditions" class="fade-me-in"
+                     hx-get="/fhir/Conditions/{{ patient['id'] }}"
+                     hx-trigger="load"
+                     hx-indicator="#conditions-loader"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
     <div class="col-md-6">
         <div class="card">
             <div class="card-header bg-primary text-white">

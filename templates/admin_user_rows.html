@@ -1,14 +1,14 @@
 {% for user in users %}
 <tr>
-    <td class="font-monospace small">{{ user.wallet_address }}</td>
+    <td class="font-monospace small">{{ user.username }}</td>
     <td>
         <form class="d-inline"
-              hx-post="{{ url_for('admin_set_user_role', wallet_address=user.wallet_address) }}"
+              hx-post="{{ url_for('admin_set_user_role', username=user.username) }}"
               hx-target="#admin-user-rows"
               hx-swap="innerHTML">
             <select name="role" class="form-select form-select-sm d-inline-block w-auto"
                     onchange="this.form.requestSubmit ? htmx.trigger(this.form, 'submit') : null"
-                    aria-label="Role for {{ user.wallet_address }}">
+                    aria-label="Role for {{ user.username }}">
                 {% for role in ['admin', 'clinician', 'viewer'] %}
                 <option value="{{ role }}" {% if user.role == role %}selected{% endif %}>{{ role|capitalize }}</option>
                 {% endfor %}
@@ -28,7 +28,7 @@
     <td>
         {% if user.status != 'active' %}
         <button class="btn btn-sm btn-success"
-                hx-post="{{ url_for('admin_set_user_status', wallet_address=user.wallet_address) }}"
+                hx-post="{{ url_for('admin_set_user_status', username=user.username) }}"
                 hx-vals='{"status": "active"}'
                 hx-target="#admin-user-rows"
                 hx-swap="innerHTML">
@@ -37,11 +37,11 @@
         {% endif %}
         {% if user.status != 'disabled' %}
         <button class="btn btn-sm btn-outline-danger"
-                hx-post="{{ url_for('admin_set_user_status', wallet_address=user.wallet_address) }}"
+                hx-post="{{ url_for('admin_set_user_status', username=user.username) }}"
                 hx-vals='{"status": "disabled"}'
                 hx-target="#admin-user-rows"
                 hx-swap="innerHTML"
-                hx-confirm="Disable {{ user.wallet_address }}? They will lose access immediately.">
+                hx-confirm="Disable {{ user.username }}? They will lose access immediately.">
             Disable
         </button>
         {% endif %}

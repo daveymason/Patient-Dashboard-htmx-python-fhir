@@ -1,0 +1,43 @@
+{% if error %}
+<div class="alert alert-danger mb-0">
+    <i class="fas fa-exclamation-triangle me-2"></i>
+    <strong>Problem list could not be loaded.</strong> {{ error }}
+    <div class="small mt-1">This is not the same as having no conditions on file.</div>
+</div>
+{% elif conditions %}
+<div class="table-responsive">
+    <table class="table table-hover mb-0">
+        <thead class="table-light">
+            <tr>
+                <th>Onset</th>
+                <th>Condition</th>
+                <th>Clinical Status</th>
+                <th>Verification</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for condition in conditions %}
+            <tr>
+                <td>{{ condition.onset }}</td>
+                <td><span class="fw-bold">{{ condition.name }}</span></td>
+                <td>
+                    <span class="badge rounded-pill
+                        {% if condition.clinical_status == 'active' %}bg-success
+                        {% elif condition.clinical_status == 'resolved' %}bg-secondary
+                        {% elif condition.clinical_status == 'inactive' %}bg-info
+                        {% elif condition.clinical_status == 'Unknown' %}bg-secondary
+                        {% else %}bg-warning text-dark{% endif %}">
+                        {{ condition.clinical_status|capitalize }}
+                    </span>
+                </td>
+                <td class="text-muted small">{{ condition.verification_status or '—' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="alert alert-info mb-0">
+    <i class="fas fa-info-circle me-2"></i> No conditions recorded for this patient.
+</div>
+{% endif %}

@@ -14,60 +14,14 @@
     <link href="{{ url_for('static', filename='styles.css') }}" rel="stylesheet">
 </head>
 <body>
-    <nav class="sidebar">
-        <div class="position-sticky">
-            <div class="sidebar-logo py-3 px-2 mb-2 d-flex justify-content-center align-items-center">
-                <img src="{{ url_for('static', filename='logo.png') }}" alt="Logo" class="img-fluid" style="max-height: 40px;">
-            </div>
-            <ul class="nav flex-column">
-                <li class="nav-item">
-                    <a class="nav-link" href="#" hx-get="/fhir/Patients" hx-target="#content" hx-indicator="this" hx-swap="innerHTML transition:true">
-                        <i class="fas fa-users"></i>
-                        <span> Patients</span>
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="#" hx-get="/fhir/Demographics" hx-target="#content" hx-indicator="this" hx-swap="innerHTML transition:true">
-                        <i class="fas fa-chart-pie"></i>
-                        <span> Stats</span>
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="#" hx-get="/fhir/Dashboard" hx-target="#content" hx-indicator="this" hx-swap="innerHTML transition:true">
-                        <i class="fas fa-chart-bar"></i>
-                        <span> Insights</span>
-                    </a>
-                </li>
-                {% if current_user.is_authenticated and current_user.is_admin %}
-                <li class="nav-item">
-                    <a class="nav-link" href="{{ url_for('admin_users') }}">
-                        <i class="fas fa-user-shield"></i>
-                        <span> Users</span>
-                    </a>
-                </li>
-                <li class="nav-item">
-                    <a class="nav-link" href="{{ url_for('admin_audit') }}">
-                        <i class="fas fa-clipboard-check"></i>
-                        <span> Audit Log</span>
-                    </a>
-                </li>
-                {% endif %}
-                <li class="nav-item">
-                    <a class="nav-link" href="https://github.com/daveymason/Patient-Dashboard-htmx-python-fhir" target="_blank" rel="noopener noreferrer">
-                        <i class="fab fa-github"></i>
-                        <span> The Code</span>
-                    </a>
-                </li>
-            </ul>
-        </div>
-    </nav>
+    {% with spa_shell=true %}{% include "sidebar.html" %}{% endwith %}
 
     {% include "header.html" %}
 
     <div class="main-content">
         <div class="content-wrapper">
             <div class="container-fluid">
-                <div id="content" class="fade-me-in" hx-get="/fhir/Patients" hx-trigger="load" hx-swap="innerHTML transition:true">
+                <div id="content" class="fade-me-in" hx-get="{{ initial_view }}" hx-trigger="load" hx-swap="innerHTML transition:true">
                     <div class="d-flex justify-content-center mt-5">
                         <div class="spinner-border text-primary" role="status">
                             <span class="visually-hidden">Loading...</span>
@@ -80,6 +34,8 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/js/all.min.js" integrity="sha512-6sSYJqDreZRZGkJ3b+YfdhB3MzmuP9R7X1QZ6g5aIXhRvR1Y/N/P47jmnkENm7YL3oqsmI6AK+V6AD99uWDnIw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
     <script src="{{ url_for('static', filename='htmx-setup.js') }}"></script>
+    <script src="{{ url_for('static', filename='charts.js') }}"></script>
 </body>
 </html>

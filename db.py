@@ -3,7 +3,10 @@
 The app previously had no user store at all -- `User.get()` fabricated a user
 from whatever ID it was handed, so proving control of any wallet granted access
 to every patient record. This module gives identity somewhere to live and makes
-access reviewable after the fact.
+access reviewable after the fact. Authentication has since moved from wallet
+signatures to username/password, but the store and its pending/active/disabled
+approval model are unchanged -- only the identity column and how it's proven
+are different.
 
 The audit log is append-only, enforced by triggers rather than convention: even
 a bug or a direct sqlite3 session cannot rewrite history.
@@ -15,6 +18,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from flask import current_app, g
+from werkzeug.security import generate_password_hash
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +33,8 @@ STATUS_DISABLED = 'disabled'
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
-    wallet_address TEXT PRIMARY KEY,
+    username       TEXT PRIMARY KEY,
+    password_hash  TEXT NOT NULL,
     display_name   TEXT,
     role           TEXT NOT NULL DEFAULT 'viewer',
     status         TEXT NOT NULL DEFAULT 'pending',
@@ -93,30 +98,70 @@ def close_connection(_exception=None):
         connection.close()
 
 
+def _retire_wallet_era_users_table(connection):
+    """Rename a users table left over from the wallet-auth era.
+
+    That schema keyed users on wallet_address with no password_hash column.
+    `CREATE TABLE IF NOT EXISTS` silently keeps it, after which every seed
+    INSERT and login query crashes on the missing username column. Wallet
+    identities cannot be carried into password auth (there is no password to
+    migrate), so the old table is preserved under a backup name for the
+    operator and a fresh one is created.
+    """
+    columns = {
+        row['name']
+        for row in connection.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if not columns or 'username' in columns:
+        return
+    backup_name = f"users_wallet_era_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    connection.execute(f'ALTER TABLE users RENAME TO {backup_name}')
+    connection.commit()
+    logger.warning(
+        'Found a users table from the wallet-auth era; renamed it to %s. '
+        'Accounts must be re-created (passwords cannot be derived from '
+        'wallet identities).', backup_name,
+    )
+
+
 def init_db(app):
     """Create the schema and seed the bootstrap administrator."""
     with app.app_context():
         connection = get_connection()
+        _retire_wallet_era_users_table(connection)
         connection.executescript(SCHEMA)
         connection.commit()
 
-        wallet = app.config.get('INITIAL_ADMIN_WALLET')
-        if wallet:  # already validated by config._resolve_initial_admin
-            existing = get_user(wallet)
+        username = app.config.get('INITIAL_ADMIN_USERNAME')
+        password = app.config.get('INITIAL_ADMIN_PASSWORD')
+        if username and password:  # already validated by config._resolve_initial_admin
+            existing = get_user(username)
             if existing is None:
                 connection.execute(
-                    'INSERT INTO users (wallet_address, display_name, role, status, created_at)'
-                    ' VALUES (?, ?, ?, ?, ?)',
-                    (wallet, 'Initial administrator', ROLE_ADMIN, STATUS_ACTIVE, _utcnow()),
+                    'INSERT INTO users'
+                    ' (username, password_hash, display_name, role, status, created_at)'
+                    ' VALUES (?, ?, ?, ?, ?, ?)',
+                    (username, generate_password_hash(password), 'Initial administrator',
+                     ROLE_ADMIN, STATUS_ACTIVE, _utcnow()),
                 )
                 connection.commit()
                 logger.info('Seeded initial administrator account')
             elif existing['status'] != STATUS_ACTIVE or existing['role'] != ROLE_ADMIN:
+                # Promoting an existing row must also reset its credential to
+                # the operator-configured password. Without this, anyone who
+                # pre-registered the configured admin username would have
+                # *their* password promoted to an active admin login.
                 connection.execute(
-                    'UPDATE users SET role = ?, status = ? WHERE wallet_address = ?',
-                    (ROLE_ADMIN, STATUS_ACTIVE, wallet),
+                    'UPDATE users SET role = ?, status = ?, password_hash = ?'
+                    ' WHERE username = ?',
+                    (ROLE_ADMIN, STATUS_ACTIVE, generate_password_hash(password),
+                     username),
                 )
                 connection.commit()
+                logger.warning(
+                    'Promoted existing account to administrator and reset its '
+                    'password to the configured INITIAL_ADMIN_PASSWORD.'
+                )
         close_connection()
 
 
@@ -124,60 +169,61 @@ def init_db(app):
 # Users
 # --------------------------------------------------------------------------
 
-def get_user(wallet_address):
-    if not wallet_address:
+def get_user(username):
+    if not username:
         return None
     row = get_connection().execute(
-        'SELECT * FROM users WHERE wallet_address = ?',
-        (wallet_address.strip().lower(),),
+        'SELECT * FROM users WHERE username = ?',
+        (username.strip().lower(),),
     ).fetchone()
     return dict(row) if row else None
 
 
-def register_pending_user(wallet_address, display_name=None):
-    """Record a first-time wallet as pending approval.
+def register_pending_user(username, password_hash, display_name=None):
+    """Record a first-time registration as pending approval.
 
     Registering is deliberately not the same as granting access -- a new row
     lands as `pending` and cannot sign in until an administrator activates it.
     """
-    wallet = wallet_address.strip().lower()
+    username = username.strip().lower()
     connection = get_connection()
     connection.execute(
-        'INSERT OR IGNORE INTO users (wallet_address, display_name, role, status, created_at)'
-        ' VALUES (?, ?, ?, ?, ?)',
-        (wallet, display_name, ROLE_VIEWER, STATUS_PENDING, _utcnow()),
+        'INSERT OR IGNORE INTO users'
+        ' (username, password_hash, display_name, role, status, created_at)'
+        ' VALUES (?, ?, ?, ?, ?, ?)',
+        (username, password_hash, display_name, ROLE_VIEWER, STATUS_PENDING, _utcnow()),
     )
     connection.commit()
-    return get_user(wallet)
+    return get_user(username)
 
 
-def record_login(wallet_address):
+def record_login(username):
     connection = get_connection()
     connection.execute(
-        'UPDATE users SET last_login_at = ? WHERE wallet_address = ?',
-        (_utcnow(), wallet_address.strip().lower()),
+        'UPDATE users SET last_login_at = ? WHERE username = ?',
+        (_utcnow(), username.strip().lower()),
     )
     connection.commit()
 
 
-def set_user_status(wallet_address, status):
+def set_user_status(username, status):
     if status not in (STATUS_PENDING, STATUS_ACTIVE, STATUS_DISABLED):
         raise ValueError(f'Unknown status: {status}')
     connection = get_connection()
     connection.execute(
-        'UPDATE users SET status = ? WHERE wallet_address = ?',
-        (status, wallet_address.strip().lower()),
+        'UPDATE users SET status = ? WHERE username = ?',
+        (status, username.strip().lower()),
     )
     connection.commit()
 
 
-def set_user_role(wallet_address, role):
+def set_user_role(username, role):
     if role not in ROLES:
         raise ValueError(f'Unknown role: {role}')
     connection = get_connection()
     connection.execute(
-        'UPDATE users SET role = ? WHERE wallet_address = ?',
-        (role, wallet_address.strip().lower()),
+        'UPDATE users SET role = ? WHERE username = ?',
+        (role, username.strip().lower()),
     )
     connection.commit()
 
@@ -198,23 +244,25 @@ def count_active_admins():
     return row['n'] if row else 0
 
 
-def grant_admin(wallet_address):
-    """Create or promote a wallet to an active administrator.
+def grant_admin(username, password_hash):
+    """Create or promote a user to an active administrator, (re)setting
+    their password.
 
-    The recovery path when nobody can sign in -- reachable from the CLI without
-    hand-editing the database.
+    The recovery path when nobody can sign in -- reachable from the CLI
+    without hand-editing the database.
     """
-    wallet = wallet_address.strip().lower()
+    username = username.strip().lower()
     connection = get_connection()
     connection.execute(
-        'INSERT INTO users (wallet_address, display_name, role, status, created_at)'
-        ' VALUES (?, ?, ?, ?, ?)'
-        ' ON CONFLICT(wallet_address) DO UPDATE SET role = excluded.role,'
+        'INSERT INTO users (username, password_hash, display_name, role, status, created_at)'
+        ' VALUES (?, ?, ?, ?, ?, ?)'
+        ' ON CONFLICT(username) DO UPDATE SET'
+        ' password_hash = excluded.password_hash, role = excluded.role,'
         ' status = excluded.status',
-        (wallet, 'Administrator', ROLE_ADMIN, STATUS_ACTIVE, _utcnow()),
+        (username, password_hash, 'Administrator', ROLE_ADMIN, STATUS_ACTIVE, _utcnow()),
     )
     connection.commit()
-    return get_user(wallet)
+    return get_user(username)
 
 
 # --------------------------------------------------------------------------

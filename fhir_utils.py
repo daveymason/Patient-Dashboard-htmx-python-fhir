@@ -207,3 +207,68 @@ def observation_value(resource):
 def observation_code(resource):
     """Human-readable label for what an Observation measured."""
     return first_coding_display(resource.get('code', {}), fallback='Unknown')
+
+
+# LOINC codes for systolic/diastolic blood pressure. Some servers record these
+# as components of a panel Observation (code 85354-9); others record them as
+# two independent Observations under these codes directly, sharing an
+# encounter but no panel wrapper. Public so app.py can query for the second
+# shape directly, not just extract it from a panel's components.
+LOINC_SYSTOLIC = '8480-6'
+LOINC_DIASTOLIC = '8462-4'
+
+
+def blood_pressure_components(resource):
+    """Pull numeric systolic/diastolic values out of a blood-pressure Observation.
+
+    Returns (systolic, diastolic), either or both None if not present or not
+    numeric. Used for charting, where a combined display string like the one
+    `observation_value` produces for the table isn't usable.
+    """
+    systolic = diastolic = None
+    for component in resource.get('component') or []:
+        if not isinstance(component, dict):
+            continue
+        coding = (component.get('code') or {}).get('coding') or []
+        codes = {c.get('code') for c in coding if isinstance(c, dict)}
+        display = first_coding_display(component.get('code', {})).lower()
+        value = (component.get('valueQuantity') or {}).get('value')
+        if value is None:
+            continue
+        if LOINC_SYSTOLIC in codes or 'systolic' in display:
+            systolic = value
+        elif LOINC_DIASTOLIC in codes or 'diastolic' in display:
+            diastolic = value
+    return systolic, diastolic
+
+
+def condition_onset(resource):
+    """Render a Condition's onset (a FHIR choice type) for display and sorting.
+
+    Falls back to `recordedDate` at the call site when onset is absent
+    entirely -- onset is frequently missing on real data (roughly 1 in 4 on the
+    public HAPI server), while recordedDate is a reasonable proxy for "when did
+    this appear on the record."
+    """
+    # Sort values go through sort_key(), never parse_fhir_datetime() raw: the
+    # raw parse keeps the timezone (HAPI onsets routinely carry one), while the
+    # recordedDate fallback the caller mixes in is naive -- and Python refuses
+    # to compare aware with naive, crashing the whole panel sort.
+    if 'onsetDateTime' in resource:
+        value = resource['onsetDateTime']
+        return format_fhir_date(value), sort_key(value)
+
+    if isinstance(resource.get('onsetPeriod'), dict):
+        start = resource['onsetPeriod'].get('start')
+        if start:
+            return format_fhir_date(start), sort_key(start)
+
+    if resource.get('onsetString'):
+        return resource['onsetString'], None
+
+    if isinstance(resource.get('onsetAge'), dict):
+        age_value = resource['onsetAge'].get('value')
+        if age_value is not None:
+            return f'Age {age_value}', None
+
+    return None, None
