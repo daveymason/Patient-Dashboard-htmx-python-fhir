@@ -5,6 +5,34 @@
 </div>
 {% endif %}
 
+{% if charts %}
+{% set chart_titles = {
+    'blood_pressure': 'Blood Pressure',
+    'heart_rate': 'Heart Rate',
+    'temperature': 'Temperature',
+    'respiratory_rate': 'Respiratory Rate',
+} %}
+<div class="row g-3 mb-3">
+    {% for key in ['blood_pressure', 'heart_rate', 'temperature', 'respiratory_rate'] %}
+    {% if charts[key] %}
+    <div class="col-md-6">
+        <div class="card h-100">
+            <div class="card-header bg-light py-2">
+                <small class="text-muted text-uppercase fw-bold">{{ chart_titles[key] }}</small>
+            </div>
+            <div class="card-body">
+                <div style="position: relative; height: 200px;">
+                    <canvas id="vitals-chart-{{ key }}"></canvas>
+                </div>
+                <script type="application/json" data-chart-for="vitals-chart-{{ key }}">{{ charts[key]|tojson }}</script>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+    {% endfor %}
+</div>
+{% endif %}
+
 {% if vital_signs %}
 <div class="table-responsive">
     <table class="table table-sm table-striped mb-0">

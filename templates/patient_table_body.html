@@ -1,39 +1,38 @@
-{% for patient in patients %}
-<tr>
-    <td class="font-monospace small">{{ patient.id }}</td>
-    <td>{{ patient.name }}</td>
-    <td>{{ patient.gender|capitalize }}</td>
-    <td>{{ patient.birthDate }}</td>
-    <td>{{ patient.address }}</td>
-    <td>{{ patient.telecom }}</td>
-    <td>
-        <button class="btn btn-sm btn-primary"
-                hx-get="/fhir/Patient/{{ patient.id }}"
-                hx-target="#content"
-                hx-swap="innerHTML transition:true">
-            View Details <i class="fas fa-arrow-right"></i>
-        </button>
-    </td>
-</tr>
-{% endfor %}
+{% macro sort_th(label, field, icon, current_sort) %}
+{% set active = current_sort and current_sort.lstrip('-') == field %}
+{% set next_value = ('-' + field) if (active and not current_sort.startswith('-')) else field %}
+<th>
+    <button type="button" class="btn btn-link btn-sm p-0 text-white text-decoration-none fw-bold"
+            hx-post="/fhir/search_patients" hx-target="#patients-table-wrapper" hx-swap="innerHTML"
+            hx-include="#patient-search" hx-vals='{"sort": "{{ next_value }}"}'>
+        <i class="{{ icon }}"></i> | {{ label }}
+        {% if active %}
+        <i class="fas fa-sort-{{ 'down' if current_sort.startswith('-') else 'up' }} ms-1"></i>
+        {% else %}
+        <i class="fas fa-sort ms-1 text-muted"></i>
+        {% endif %}
+    </button>
+</th>
+{% endmacro %}
 
-{% if not patients and not error %}
-<tr>
-    <td colspan="7" class="text-center py-3 text-muted">
-        No patients found matching your search criteria
-    </td>
-</tr>
-{% endif %}
+{# Carries the active sort across search requests: the search box hx-includes
+   this input, and it re-renders (inside the wrapper) with every sort/search
+   response. Without it, typing in the search box silently dropped the sort. #}
+<input type="hidden" id="current-sort" name="sort" value="{{ current_sort or '' }}">
 
-{% if next_url %}
-<tr id="patients-load-more">
-    <td colspan="7" class="text-center py-3">
-        <button class="btn btn-sm btn-outline-secondary"
-                hx-get="/fhir/Patients/page?url={{ next_url|urlencode }}"
-                hx-target="#patients-load-more"
-                hx-swap="outerHTML">
-            Load more <i class="fas fa-chevron-down ms-1"></i>
-        </button>
-    </td>
-</tr>
-{% endif %}
+<table class="table table-striped table-hover mb-0">
+    <thead class="table-dark">
+        <tr>
+            <th><i class="fas fa-id-card"></i> | ID</th>
+            {{ sort_th('Name', 'family', 'fas fa-user', current_sort) }}
+            {{ sort_th('Gender', 'gender', 'fas fa-genderless', current_sort) }}
+            {{ sort_th('Birth Date', 'birthdate', 'fas fa-birthday-cake', current_sort) }}
+            <th><i class="fas fa-map-marker-alt"></i> | Address</th>
+            <th><i class="fas fa-phone"></i> | Contact</th>
+            <th><i class="fas fa-info-circle"></i> | Details</th>
+        </tr>
+    </thead>
+    <tbody id="patients-table-body">
+        {% include "patient_rows.html" %}
+    </tbody>
+</table>

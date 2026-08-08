@@ -1,36 +1,33 @@
-"""Wallet authentication backed by a real user store.
+"""Username/password authentication backed by a real user store.
 
-The signature check was already correct -- it proves the caller controls the
-wallet. What was missing was authorization: the previous code logged in whoever
-presented a valid signature, so any wallet on earth could read every patient
-record. Verification now only establishes *who* you are; the users table decides
-whether that identity may enter.
+Replaces the earlier MetaMask wallet-signature flow -- proving control of a
+wallet was cryptographically sound, but a browser-wallet signature is an
+unusual, high-friction way to sign in to a healthcare admin tool, and it
+blocked anyone without a wallet extension installed from even attempting to
+use the app. This keeps the same user store, role model, and
+pending-until-approved semantics from that flow; only the credential check
+changes -- a password checked against a stored hash, instead of a signature
+checked against a session-bound nonce.
 """
-import binascii
 import logging
-import os
 from functools import wraps
 
-from eth_account import Account
-from eth_account.messages import encode_defunct
-from flask import abort, session
+from flask import abort
 from flask_login import UserMixin, current_user
+from werkzeug.security import check_password_hash, generate_password_hash
 
 import db
 
 logger = logging.getLogger(__name__)
-
-NONCE_SESSION_KEY = 'auth_nonce'
-NONCE_ADDRESS_KEY = 'auth_nonce_address'
 
 
 class User(UserMixin):
     """A row from the users table, adapted for Flask-Login."""
 
     def __init__(self, record):
-        self.id = record['wallet_address']
-        self.wallet_address = record['wallet_address']
-        self.display_name = record.get('display_name') or record['wallet_address']
+        self.id = record['username']
+        self.username = record['username']
+        self.display_name = record.get('display_name') or record['username']
         self.role = record['role']
         self.status = record['status']
 
@@ -42,12 +39,6 @@ class User(UserMixin):
     @property
     def is_admin(self):
         return self.role == db.ROLE_ADMIN
-
-    @property
-    def short_address(self):
-        if len(self.wallet_address) < 12:
-            return self.wallet_address
-        return f'{self.wallet_address[:6]}...{self.wallet_address[-4:]}'
 
     def has_role(self, *roles):
         return self.role in roles
@@ -83,42 +74,22 @@ def require_role(*roles):
     return decorator
 
 
-# Address validation lives in config.py, so a value rejected at boot is also
-# rejected at sign-in. Callers import it from there directly.
+def hash_password(password):
+    return generate_password_hash(password)
 
 
-def issue_nonce(wallet_address):
-    """Create a single-use challenge and bind it to this session.
+def verify_credentials(username, password):
+    """Look up a user and check their password.
 
-    Stored under one fixed key rather than one key per address, so a caller
-    cannot accumulate live nonces for many addresses in a single session.
+    Returns the user record if the password matches, regardless of account
+    status -- callers decide whether a pending or disabled account may
+    proceed, since "wrong password" and "not yet approved" are different
+    messages to show, and conflating them would either leak which usernames
+    exist or hide a legitimate approval-pending state behind a generic error.
     """
-    nonce = (
-        'Sign this message to sign in to the Patient Dashboard.\n\n'
-        f'Nonce: {binascii.hexlify(os.urandom(16)).decode()}'
-    )
-    session[NONCE_SESSION_KEY] = nonce
-    session[NONCE_ADDRESS_KEY] = wallet_address.strip().lower()
-    return nonce
-
-
-def consume_nonce(wallet_address):
-    """Pop the pending nonce if it belongs to this address, else None."""
-    stored_nonce = session.pop(NONCE_SESSION_KEY, None)
-    stored_address = session.pop(NONCE_ADDRESS_KEY, None)
-    if not stored_nonce or not stored_address:
+    record = db.get_user(username)
+    if record is None:
         return None
-    if stored_address != wallet_address.strip().lower():
+    if not check_password_hash(record['password_hash'], password):
         return None
-    return stored_nonce
-
-
-def recover_signer(nonce, signature):
-    """Recover the signing address, or None if the signature is unusable."""
-    try:
-        return Account.recover_message(
-            encode_defunct(text=nonce), signature=signature
-        ).lower()
-    except Exception as exc:
-        logger.info('Signature recovery failed: %s', type(exc).__name__)
-        return None
+    return record

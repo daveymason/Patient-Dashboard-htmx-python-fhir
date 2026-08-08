@@ -225,7 +225,10 @@ header.with-sidebar {
 }
 
 .content-wrapper {
-    padding-top: 90px;
+    /* The header sits in normal flow (it is not position:fixed), so no
+       clearance padding is needed -- the old 90px left a dead band under
+       the header on every page. */
+    padding-top: 10px;
 }
 
 /* HTMX transitions and animations */

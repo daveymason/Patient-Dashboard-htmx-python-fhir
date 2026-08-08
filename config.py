@@ -2,10 +2,12 @@
 
 The app refuses to start in production without an explicit SECRET_KEY. The
 previous `os.urandom(24)` default looked safe but silently broke sessions: each
-gunicorn worker generated its own key, so a login nonce written by one worker
+gunicorn worker generated its own key, so a session cookie signed by one worker
 could not be read by another, and every restart logged everyone out.
 """
+import logging
 import os
+import re
 from datetime import timedelta
 
 
@@ -20,48 +22,67 @@ def _flag(name, default=False):
     return raw.strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-# The burn address. It is a syntactically valid address that no private key
-# maps to, so nobody can ever produce a signature for it.
-ZERO_ADDRESS = '0x' + '0' * 40
+MIN_USERNAME_LENGTH = 3
+MAX_USERNAME_LENGTH = 64
+MIN_PASSWORD_LENGTH = 10
+_USERNAME_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
 
 
-def is_valid_wallet_address(address):
-    """True if `address` is a well-formed, usable Ethereum address.
+def is_valid_username(value):
+    """True if `value` is an acceptable username: length and character set only.
 
-    The zero address is rejected: seeding it as the administrator produces an
-    account that can never sign in, which locks everyone out of a fresh install.
+    No uniqueness or reservation check here -- that's a database lookup, done
+    by the caller (self-registration checks it against existing accounts; the
+    bootstrap admin is trusted to not collide).
     """
-    if not isinstance(address, str):
+    if not isinstance(value, str):
         return False
-    address = address.strip()
-    if not address.startswith('0x') or len(address) != 42:
-        return False
-    try:
-        int(address[2:], 16)
-    except ValueError:
-        return False
-    return address.lower() != ZERO_ADDRESS
+    value = value.strip()
+    return (
+        MIN_USERNAME_LENGTH <= len(value) <= MAX_USERNAME_LENGTH
+        and bool(_USERNAME_RE.fullmatch(value))
+    )
 
 
 def _resolve_initial_admin():
-    """Read INITIAL_ADMIN_WALLET, rejecting values that would brick the install."""
-    raw = (os.environ.get('INITIAL_ADMIN_WALLET') or '').strip().lower()
-    if not raw:
-        return ''
+    """Read INITIAL_ADMIN_USERNAME/PASSWORD, rejecting values that would
+    brick the install or seed a weak credential.
 
-    if not is_valid_wallet_address(raw):
-        import logging
-        reason = ('it is the zero (burn) address, which nobody can sign for'
-                  if raw == ZERO_ADDRESS
-                  else 'it is not a well-formed 0x-prefixed 40-hex-digit address')
-        logging.getLogger(__name__).error(
-            'Ignoring INITIAL_ADMIN_WALLET=%s because %s. No administrator will '
-            'be seeded. Set it to your own wallet address, or grant access after '
-            'startup with:  flask --app app grant-admin <address>',
-            raw, reason,
+    Returns (username, password) -- both empty if nothing usable was provided,
+    so the caller can tell "not configured" apart from "configured badly"
+    without re-deriving the validation.
+    """
+    username = (os.environ.get('INITIAL_ADMIN_USERNAME') or '').strip().lower()
+    password = os.environ.get('INITIAL_ADMIN_PASSWORD') or ''
+
+    if not username and not password:
+        return '', ''
+
+    logger = logging.getLogger(__name__)
+
+    if not username or not password:
+        logger.error(
+            'INITIAL_ADMIN_USERNAME and INITIAL_ADMIN_PASSWORD must both be set '
+            'to seed an administrator. Ignoring the one that was provided.'
         )
-        return ''
-    return raw
+        return '', ''
+
+    if not is_valid_username(username):
+        logger.error(
+            'Ignoring INITIAL_ADMIN_USERNAME=%r: usernames must be %d-%d characters '
+            'of letters, numbers, dots, hyphens or underscores.',
+            username, MIN_USERNAME_LENGTH, MAX_USERNAME_LENGTH,
+        )
+        return '', ''
+
+    if len(password) < MIN_PASSWORD_LENGTH:
+        logger.error(
+            'Ignoring INITIAL_ADMIN_PASSWORD: must be at least %d characters.',
+            MIN_PASSWORD_LENGTH,
+        )
+        return '', ''
+
+    return username, password
 
 
 class Config:
@@ -70,7 +91,9 @@ class Config:
     DEBUG = False
     TESTING = False
 
-    FHIR_SERVER_URL = os.environ.get('FHIR_SERVER_URL', 'http://hapi.fhir.org/baseR4')
+    # https, not http: the server 301s every plain-http call (one wasted round
+    # trip per request) and mints https pagination cursors either way.
+    FHIR_SERVER_URL = os.environ.get('FHIR_SERVER_URL', 'https://hapi.fhir.org/baseR4')
     FHIR_TIMEOUT = float(os.environ.get('FHIR_TIMEOUT', '10'))
     FHIR_PAGE_SIZE = int(os.environ.get('FHIR_PAGE_SIZE', '20'))
 
@@ -79,11 +102,11 @@ class Config:
         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'dashboard.db'),
     )
 
-    # Wallet allowlisted as an administrator on first boot, so there is a way
+    # Account allowlisted as an administrator on first boot, so there is a way
     # into a fresh install. Everyone else starts as 'pending' and must be
-    # approved before they can sign in. Invalid values are ignored rather than
-    # seeded -- see _resolve_initial_admin.
-    INITIAL_ADMIN_WALLET = _resolve_initial_admin()
+    # approved before they can sign in. Invalid or incomplete values are
+    # ignored rather than seeded -- see _resolve_initial_admin.
+    INITIAL_ADMIN_USERNAME, INITIAL_ADMIN_PASSWORD = _resolve_initial_admin()
 
     # Session hardening.
     SESSION_COOKIE_HTTPONLY = True

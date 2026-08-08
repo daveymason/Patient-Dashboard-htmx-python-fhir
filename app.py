@@ -4,6 +4,7 @@ Flask + HTMX viewer over a FHIR R4 server. Routes return HTML fragments that
 HTMX swaps into the page, so there is no client-side framework and no build step.
 """
 import logging
+import re
 
 import click
 from flask import (
@@ -18,12 +19,15 @@ from flask_wtf.csrf import CSRFProtect
 
 import auth
 import db
+from charts import demographics_charts, vitals_charts
 from config import (
-    ConfigError, is_valid_wallet_address, resolve_secret_key, select_config
+    ConfigError, MAX_USERNAME_LENGTH, MIN_PASSWORD_LENGTH, MIN_USERNAME_LENGTH,
+    is_valid_username, resolve_secret_key, select_config,
 )
 from fhir_client import FhirClient
 from fhir_utils import (
-    calculate_age, first_coding_display, format_address, format_fhir_date,
+    LOINC_DIASTOLIC, LOINC_SYSTOLIC, blood_pressure_components, calculate_age,
+    condition_onset, first_coding_display, format_address, format_fhir_date,
     observation_code, observation_value, patient_display_name, patient_initials,
     sort_key,
 )
@@ -37,11 +41,18 @@ limiter = Limiter(key_func=get_remote_address)
 
 # LOINC codes for the vital signs panel.
 VITAL_SIGN_CODES = {
-    'blood_pressure': ('85354-9', 'Blood Pressure'),
-    'heart_rate': ('8867-4', 'Heart Rate'),
-    'temperature': ('8310-5', 'Temperature'),
-    'respiratory_rate': ('9279-1', 'Respiratory Rate'),
+    'blood_pressure': ('85354-9', 'Blood Pressure', 'mmHg'),
+    'heart_rate': ('8867-4', 'Heart Rate', 'bpm'),
+    'temperature': ('8310-5', 'Temperature', '°C'),
+    'respiratory_rate': ('9279-1', 'Respiratory Rate', '/min'),
 }
+
+# Patient search parameters that may be sorted, mapped to nothing (they're
+# already valid FHIR _sort values) -- kept as a set purely to reject anything
+# else a caller might try to inject through the sort parameter.
+_SORTABLE_FIELDS = {'family', 'birthdate', 'gender'}
+
+_DATE_SEARCH_RE = re.compile(r'\d{4}(-\d{2}(-\d{2})?)?$')
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +97,7 @@ def create_app(config_object=None):
             logger.warning(
                 'No active administrator account exists. Nobody can approve '
                 'sign-in requests. Grant one with: '
-                'flask --app app grant-admin <wallet-address>'
+                'flask --app app grant-admin <username>'
             )
 
     @app.before_request
@@ -164,6 +175,32 @@ def _bundle_next_link(result):
     return None
 
 
+def _validate_sort(raw):
+    """Only pass through a `sort` value that is actually one of our columns.
+
+    The value doubles as the literal FHIR `_sort` parameter (e.g. `-birthdate`),
+    so an unchecked value would let a caller sort -- or otherwise perturb the
+    query -- by an arbitrary FHIR search parameter.
+    """
+    if not raw:
+        return None
+    field = raw[1:] if raw.startswith('-') else raw
+    return raw if field in _SORTABLE_FIELDS else None
+
+
+def _looks_like_date(term):
+    return bool(_DATE_SEARCH_RE.fullmatch(term))
+
+
+def _looks_like_phone(term):
+    digits = re.sub(r'[\s().+-]', '', term)
+    return digits.isdigit() and len(digits) >= 6
+
+
+def _looks_like_id(term):
+    return term.replace('-', '').isalnum() and any(c.isdigit() for c in term)
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -178,7 +215,15 @@ def register_routes(app):
     def index():
         if not current_user.is_authenticated:
             return redirect(url_for('login'))
-        return render_template('index.html')
+        # `view` lets sidebar links on non-SPA pages (admin, settings) land
+        # back in the shell with the right section loaded, not just Patients.
+        views = {
+            'patients': '/fhir/Patients',
+            'stats': '/fhir/Demographics',
+            'insights': '/fhir/Dashboard',
+        }
+        initial_view = views.get(request.args.get('view', ''), views['patients'])
+        return render_template('index.html', initial_view=initial_view)
 
     @app.route('/health')
     def health_check():
@@ -196,72 +241,81 @@ def register_routes(app):
 
     # -- authentication ----------------------------------------------------
 
-    @app.route('/login')
+    @app.route('/login', methods=['GET', 'POST'])
+    @limiter.limit(auth_limit, methods=['POST'])
     def login():
+        # The limit applies to POST only: every logged-out visit to any page
+        # redirects through GET /login, so limiting views too would let a
+        # handful of open tabs (or one hospital NAT) 429 the sign-in page
+        # before anyone typed a password.
         if current_user.is_authenticated:
             return redirect(url_for('index'))
-        return render_template('login.html')
+        if request.method == 'GET':
+            notice = None
+            if request.args.get('registered'):
+                notice = ('Account created. An administrator must approve it '
+                          'before you can sign in.')
+            return render_template('login.html', notice=notice)
 
-    @app.route('/get_nonce_to_sign/<wallet_address>')
-    @limiter.limit(auth_limit)
-    def get_nonce_to_sign(wallet_address):
-        if not is_valid_wallet_address(wallet_address):
-            return jsonify({'error': 'Invalid wallet address format.'}), 400
-        nonce = auth.issue_nonce(wallet_address)
-        audit('login.nonce_issued', resource_type='Wallet',
-              resource_id=pseudonymize(wallet_address))
-        return jsonify({'nonce': nonce})
+        username = (request.form.get('username') or '').strip().lower()
+        password = request.form.get('password') or ''
+        if not username or not password:
+            return render_template('login.html',
+                                   error='Enter your username and password.'), 400
 
-    @app.route('/verify_signature', methods=['POST'])
-    @limiter.limit(auth_limit)
-    def verify_signature():
-        data = request.get_json(silent=True) or {}
-        signature = data.get('signed_message')
-        wallet_address = data.get('wallet_address')
-
-        if not signature or not wallet_address:
-            return jsonify({'success': False,
-                            'error': 'Missing required parameters.'}), 400
-        if not is_valid_wallet_address(wallet_address):
-            return jsonify({'success': False,
-                            'error': 'Invalid wallet address format.'}), 400
-
-        wallet_address = wallet_address.strip().lower()
-        pseudo = pseudonymize(wallet_address)
-
-        # The nonce is taken from the session, never from the request body --
-        # accepting a client-supplied nonce would let a caller replay one.
-        nonce = auth.consume_nonce(wallet_address)
-        if nonce is None:
-            audit('login.denied', outcome='failure', resource_type='Wallet',
-                  resource_id=pseudo, detail={'reason': 'no_pending_nonce'})
-            return jsonify({'success': False,
-                            'error': 'No sign-in challenge is pending. Please try again.'}), 400
-
-        recovered = auth.recover_signer(nonce, signature)
-        if recovered != wallet_address:
-            audit('login.denied', outcome='failure', resource_type='Wallet',
-                  resource_id=pseudo, detail={'reason': 'signature_mismatch'})
-            return jsonify({'success': False,
-                            'error': 'Signature verification failed.'}), 401
-
-        # Signature proves control of the wallet. It does not grant access --
-        # the users table decides that.
-        record = db.get_user(wallet_address) or db.register_pending_user(wallet_address)
+        record = auth.verify_credentials(username, password)
+        if record is None:
+            audit('login.denied', outcome='failure', resource_type='User',
+                  resource_id=pseudonymize(username), detail={'reason': 'bad_credentials'})
+            return render_template('login.html',
+                                   error='Incorrect username or password.'), 401
 
         if record['status'] != db.STATUS_ACTIVE:
-            audit('login.denied', outcome='denied', resource_type='Wallet',
-                  resource_id=pseudo, detail={'reason': f"account_{record['status']}"})
-            message = ('This wallet is not yet approved for access. '
-                       'An administrator must activate it.')
-            if record['status'] == db.STATUS_DISABLED:
-                message = 'This account has been disabled.'
-            return jsonify({'success': False, 'error': message}), 403
+            audit('login.denied', outcome='denied', resource_type='User',
+                  resource_id=pseudonymize(username),
+                  detail={'reason': f"account_{record['status']}"})
+            message = ('Your account is awaiting administrator approval.'
+                       if record['status'] == db.STATUS_PENDING
+                       else 'This account has been disabled.')
+            return render_template('login.html', error=message), 403
 
         login_user(auth.User(record))
-        db.record_login(wallet_address)
-        audit('login.success', resource_type='Wallet', resource_id=pseudo)
-        return jsonify({'success': True, 'message': 'Signed in.'})
+        db.record_login(username)
+        audit('login.success', resource_type='User', resource_id=pseudonymize(username))
+        return redirect(url_for('index'))
+
+    @app.route('/register', methods=['GET', 'POST'])
+    @limiter.limit(auth_limit, methods=['POST'])
+    def register():
+        if current_user.is_authenticated:
+            return redirect(url_for('index'))
+        if request.method == 'GET':
+            return render_template('register.html')
+
+        username = (request.form.get('username') or '').strip().lower()
+        password = request.form.get('password') or ''
+        confirm = request.form.get('confirm_password') or ''
+
+        error = None
+        if not is_valid_username(username):
+            error = (f'Choose a username of {MIN_USERNAME_LENGTH}-{MAX_USERNAME_LENGTH} '
+                     'characters: letters, numbers, dots, hyphens or underscores.')
+        elif len(password) < MIN_PASSWORD_LENGTH:
+            error = f'Choose a password of at least {MIN_PASSWORD_LENGTH} characters.'
+        elif password != confirm:
+            error = 'Passwords do not match.'
+        elif db.get_user(username) is not None:
+            error = 'That username is already taken.'
+
+        if error:
+            return render_template('register.html', error=error, username=username), 400
+
+        db.register_pending_user(username, auth.hash_password(password))
+        audit('register.pending', resource_type='User', resource_id=pseudonymize(username))
+        # Redirect rather than render (post/redirect/get): rendering the login
+        # page from POST /register left the browser parked on /register, where
+        # refresh or Back re-submitted the form and got "username taken".
+        return redirect(url_for('login', registered=1))
 
     @app.route('/logout')
     @login_required
@@ -277,11 +331,15 @@ def register_routes(app):
     @login_required
     def get_patients():
         page_size = app.config['FHIR_PAGE_SIZE']
-        result = fhir.get('Patient', params={'_count': page_size})
+        current_sort = _validate_sort(request.args.get('sort'))
+        params = {'_count': page_size}
+        if current_sort:
+            params['_sort'] = current_sort
+        result = fhir.get('Patient', params=params)
         if not result.ok:
             audit('patient.list', outcome='failure')
             return render_template('patients.html', patients=[], error=result.error,
-                                   total=None, next_url=None)
+                                   total=None, next_url=None, current_sort=current_sort)
 
         audit('patient.list')
         return render_template(
@@ -290,19 +348,25 @@ def register_routes(app):
             error=None,
             total=fhir.count('Patient'),
             next_url=_bundle_next_link(result),
+            current_sort=current_sort,
         )
 
     @app.route('/fhir/Patients/page')
     @login_required
     def get_patients_page():
         """Follow a Bundle `next` link. The URL is validated against the
-        configured server inside the client, so it cannot be pointed elsewhere."""
+        configured server inside the client, so it cannot be pointed elsewhere.
+
+        Renders rows only, never the table shell: the response replaces the
+        Load More row inside the existing <tbody>, appending the next page
+        under the rows already on screen.
+        """
         result = fhir.get_absolute(request.args.get('url', ''))
         if not result.ok:
             return _fragment_error(result.error or 'Could not load the next page.', columns=7)
         audit('patient.list', detail={'page': 'next'})
         return render_template(
-            'patient_table_body.html',
+            'patient_rows.html',
             patients=process_patient_results(result.entries),
             error=None,
             next_url=_bundle_next_link(result),
@@ -311,43 +375,68 @@ def register_routes(app):
     @app.route('/fhir/search_patients', methods=['POST'])
     @login_required
     def search_patients():
-        search_term = (request.form.get('q') or '').strip()
+        search_term = (request.values.get('q') or '').strip()
+        current_sort = _validate_sort(request.values.get('sort'))
         page_size = app.config['FHIR_PAGE_SIZE']
 
+        base_params = {'_count': page_size}
+        if current_sort:
+            base_params['_sort'] = current_sort
+
         if not search_term:
-            result = fhir.get('Patient', params={'_count': page_size})
-        else:
-            # Search name, identifier and ID together. The previous version only
-            # queried name, so looking up a patient by ID reported "not found".
-            params = {'_count': page_size}
-            if search_term.replace('-', '').isalnum() and any(c.isdigit() for c in search_term):
-                params['_id'] = search_term
-                by_id = fhir.get('Patient', params=params)
-                if by_id.ok and by_id.entries:
-                    audit('patient.search', detail={'mode': 'id'})
-                    return render_template('patient_table_body.html',
-                                           patients=process_patient_results(by_id.entries),
-                                           error=None, next_url=None)
-            result = fhir.get('Patient', params={
-                '_count': page_size, 'name:contains': search_term,
-            })
-            if result.ok and not result.entries:
-                identifier_result = fhir.get('Patient', params={
-                    '_count': page_size, 'identifier': search_term,
-                })
-                if identifier_result.ok and identifier_result.entries:
-                    result = identifier_result
+            result = fhir.get('Patient', params=base_params)
+            if not result.ok:
+                audit('patient.search', outcome='failure')
+                return _fragment_error(result.error or 'Search failed.', columns=7)
+            audit('patient.search', detail={'has_term': False})
+            return render_template(
+                'patient_table_body.html',
+                patients=process_patient_results(result.entries),
+                error=None, next_url=_bundle_next_link(result), current_sort=current_sort,
+            )
 
-        if not result.ok:
-            audit('patient.search', outcome='failure')
-            return _fragment_error(result.error or 'Search failed.', columns=7)
+        # A single search box covers several distinct FHIR search parameters.
+        # Every plausible interpretation of the term is queried concurrently
+        # rather than tried one at a time, then the first match is taken in
+        # priority order -- this both supports searching by birthdate/phone
+        # and (since it replaces what was a sequential id -> name -> identifier
+        # fallback chain) cuts the worst case from three round trips to one.
+        candidates = {'name': ('Patient', {**base_params, 'name:contains': search_term})}
+        if _looks_like_id(search_term):
+            candidates['id'] = ('Patient', {**base_params, '_id': search_term})
+        if _looks_like_date(search_term):
+            candidates['birthdate'] = ('Patient', {**base_params, 'birthdate': search_term})
+        if _looks_like_phone(search_term):
+            candidates['phone'] = ('Patient', {**base_params, 'phone': search_term})
+        candidates['identifier'] = ('Patient', {**base_params, 'identifier': search_term})
 
-        audit('patient.search', detail={'has_term': bool(search_term)})
+        results = fhir.get_many(candidates)
+
+        result = None
+        for key in ('id', 'birthdate', 'phone', 'name', 'identifier'):
+            candidate_result = results.get(key)
+            if candidate_result and candidate_result.ok and candidate_result.entries:
+                result = candidate_result
+                break
+
+        if result is None:
+            # Nothing matched. "No patients found" is only a truthful answer
+            # if every interpretation of the term was actually checked -- if
+            # any candidate query failed, a match may exist behind the
+            # failure, so report the error rather than a clean empty result.
+            failures = [r for r in results.values() if not r.ok]
+            if failures:
+                audit('patient.search', outcome='failure')
+                return _fragment_error(failures[0].error or 'Search failed.', columns=7)
+            result = results['name']
+
+        audit('patient.search', detail={'has_term': True})
         return render_template(
             'patient_table_body.html',
             patients=process_patient_results(result.entries),
             error=None,
             next_url=_bundle_next_link(result),
+            current_sort=current_sort,
         )
 
     @app.route('/fhir/Patient/<patient_id>')
@@ -403,6 +492,33 @@ def register_routes(app):
 
     # -- clinical panels ---------------------------------------------------
 
+    @app.route('/fhir/Conditions/<patient_id>')
+    @login_required
+    def get_conditions(patient_id):
+        result = fhir.get('Condition', params={'patient': patient_id, '_count': 20})
+        if not result.ok:
+            audit('patient.conditions', outcome='failure', resource_type='Patient',
+                  resource_id=pseudonymize(patient_id))
+            return render_template('conditions.html', conditions=[], error=result.error)
+
+        conditions = []
+        for resource in result.entries:
+            onset_display, onset_sort = condition_onset(resource)
+            recorded = resource.get('recordedDate')
+            conditions.append({
+                'onset': onset_display or format_fhir_date(recorded),
+                'sort_key': onset_sort or sort_key(recorded),
+                'name': first_coding_display(resource.get('code', {}),
+                                             fallback='Unknown condition'),
+                'clinical_status': first_coding_display(resource.get('clinicalStatus', {}),
+                                                        fallback='Unknown'),
+                'verification_status': first_coding_display(resource.get('verificationStatus', {})),
+            })
+        conditions.sort(key=lambda item: item['sort_key'], reverse=True)
+
+        audit('patient.conditions', resource_type='Patient', resource_id=pseudonymize(patient_id))
+        return render_template('conditions.html', conditions=conditions, error=None)
+
     @app.route('/fhir/LabResults/<patient_id>')
     @login_required
     def get_lab_results(patient_id):
@@ -435,7 +551,14 @@ def register_routes(app):
     @app.route('/fhir/VitalSigns/<patient_id>')
     @login_required
     def get_vital_signs(patient_id):
-        # Four queries, run concurrently rather than one after another.
+        # Four queries for the main vital-sign codes, run concurrently, plus
+        # two more for blood pressure specifically: some servers record it as
+        # a single panel Observation (code 85354-9) with systolic/diastolic as
+        # components, but plenty of real data -- including a chunk of this
+        # app's own default FHIR sandbox -- instead records two independent
+        # Observations under 8480-6/8462-4 sharing an encounter and no panel
+        # wrapper at all. Missing that shape was why Vital Signs came up
+        # empty for patients whose blood pressure was recorded this way.
         spec = {
             key: ('Observation', {
                 'patient': patient_id,
@@ -443,30 +566,128 @@ def register_routes(app):
                 '_sort': '-date',
                 '_count': 10,
             })
-            for key, (code, _label) in VITAL_SIGN_CODES.items()
+            for key, (code, _label, _unit) in VITAL_SIGN_CODES.items()
         }
+        spec['_standalone_systolic'] = ('Observation', {
+            'patient': patient_id, 'code': f'http://loinc.org|{LOINC_SYSTOLIC}',
+            '_sort': '-date', '_count': 10,
+        })
+        spec['_standalone_diastolic'] = ('Observation', {
+            'patient': patient_id, 'code': f'http://loinc.org|{LOINC_DIASTOLIC}',
+            '_sort': '-date', '_count': 10,
+        })
         results = fhir.get_many(spec)
 
         vital_signs = []
         failures = []
-        for key, (_code, label) in VITAL_SIGN_CODES.items():
+        # Chart series need ascending-by-date rows separate from the table's
+        # sort_key, and blood pressure needs raw systolic/diastolic numbers
+        # rather than the combined display string the table uses.
+        chart_series = {
+            key: {'label': label, 'unit': unit, 'rows': []}
+            for key, (_code, label, unit) in VITAL_SIGN_CODES.items()
+        }
+        # Encounter refs and timestamps already represented by a panel
+        # observation. Some servers expose the same measurement both as a
+        # panel and as standalone component observations; without this set
+        # the reading would be counted twice.
+        bp_panel_keys = set()
+
+        for key, (_code, label, _unit) in VITAL_SIGN_CODES.items():
             result = results.get(key)
             if result is None or not result.ok:
                 failures.append(label)
                 continue
             for resource in result.entries:
                 effective = resource.get('effectiveDateTime') or resource.get('issued')
+                date_label = format_fhir_date(effective)
+                dt = sort_key(effective)
+
+                if key == 'blood_pressure':
+                    value, unit = observation_value(resource)
+                    if value != '':
+                        vital_signs.append({
+                            'date': date_label, 'sort_key': dt, 'type': label,
+                            'value': value, 'unit': unit,
+                            'status': resource.get('status', 'unknown'),
+                        })
+                    systolic, diastolic = blood_pressure_components(resource)
+                    if systolic is not None and diastolic is not None:
+                        chart_series[key]['rows'].append((dt, date_label, systolic, diastolic))
+                    encounter_ref = (resource.get('encounter') or {}).get('reference')
+                    if encounter_ref:
+                        bp_panel_keys.add(encounter_ref)
+                    if effective:
+                        bp_panel_keys.add(f'time:{effective}')
+                    continue
+
                 value, unit = observation_value(resource)
                 if value == '':
                     continue
                 vital_signs.append({
-                    'date': format_fhir_date(effective),
-                    'sort_key': sort_key(effective),
+                    'date': date_label,
+                    'sort_key': dt,
                     'type': label,
                     'value': value,
                     'unit': unit,
                     'status': resource.get('status', 'unknown'),
                 })
+                try:
+                    chart_series[key]['rows'].append((dt, date_label, float(value)))
+                except (TypeError, ValueError):
+                    pass  # a non-numeric reading still shows in the table, just not the chart
+
+        # Pair standalone systolic/diastolic Observations by shared encounter,
+        # falling back to an *exact* timestamp match when there is no
+        # encounter to key on -- the only way to reassemble a blood-pressure
+        # reading that was never linked by a panel wrapper in the source data.
+        # Same-day-only matching is deliberately not attempted: stitching a
+        # morning systolic to an evening diastolic would fabricate a reading
+        # that never happened. Unpairable values are dropped from this panel
+        # rather than guessed at.
+        def _index_standalone_bp(result):
+            indexed = {}
+            if result is None or not result.ok:
+                return indexed
+            for resource in result.entries:
+                value = (resource.get('valueQuantity') or {}).get('value')
+                if value is None:
+                    continue
+                effective = resource.get('effectiveDateTime') or resource.get('issued')
+                pairing_key = (resource.get('encounter') or {}).get('reference') \
+                    or (f'time:{effective}' if effective else None)
+                if pairing_key is None:
+                    continue  # no encounter, no timestamp: nothing safe to pair on
+                # setdefault, not assignment: on a key collision keep the
+                # first (newest -- results are date-descending) rather than
+                # silently replacing it with an older reading.
+                indexed.setdefault(pairing_key, {
+                    'sort_key': sort_key(effective),
+                    'date': format_fhir_date(effective),
+                    'value': value,
+                    'status': resource.get('status', 'unknown'),
+                })
+            return indexed
+
+        systolic_by_key = _index_standalone_bp(results.get('_standalone_systolic'))
+        diastolic_by_key = _index_standalone_bp(results.get('_standalone_diastolic'))
+        for pairing_key, systolic_entry in systolic_by_key.items():
+            if pairing_key in bp_panel_keys:
+                continue  # already represented by a panel observation
+            diastolic_entry = diastolic_by_key.get(pairing_key)
+            if diastolic_entry is None:
+                continue
+            vital_signs.append({
+                'date': systolic_entry['date'], 'sort_key': systolic_entry['sort_key'],
+                'type': 'Blood Pressure',
+                'value': (f"Systolic blood pressure: {systolic_entry['value']} / "
+                          f"Diastolic blood pressure: {diastolic_entry['value']}"),
+                'unit': 'mmHg', 'status': systolic_entry['status'],
+            })
+            chart_series['blood_pressure']['rows'].append((
+                systolic_entry['sort_key'], systolic_entry['date'],
+                systolic_entry['value'], diastolic_entry['value'],
+            ))
 
         # Undated readings sort to the bottom rather than masquerading as newest.
         vital_signs.sort(key=lambda item: item['sort_key'], reverse=True)
@@ -480,7 +701,10 @@ def register_routes(app):
             audit('patient.vitals', resource_type='Patient',
                   resource_id=pseudonymize(patient_id))
 
-        return render_template('vital_signs.html', vital_signs=vital_signs, error=error)
+        return render_template(
+            'vital_signs.html', vital_signs=vital_signs, error=error,
+            charts=vitals_charts(chart_series),
+        )
 
     @app.route('/fhir/Medications/<patient_id>')
     @login_required
@@ -604,7 +828,10 @@ def register_routes(app):
         }
 
         audit('demographics.view')
-        return render_template('demographics.html', demographics=demographics)
+        return render_template(
+            'demographics.html', demographics=demographics,
+            charts=demographics_charts(demographics),
+        )
 
     @app.route('/fhir/Dashboard')
     @login_required
@@ -690,34 +917,34 @@ def register_routes(app):
     def admin_users():
         return render_template('admin_users.html', users=db.list_users())
 
-    @app.route('/admin/users/<wallet_address>/status', methods=['POST'])
+    @app.route('/admin/users/<username>/status', methods=['POST'])
     @login_required
     @auth.require_role(db.ROLE_ADMIN)
-    def admin_set_user_status(wallet_address):
+    def admin_set_user_status(username):
         status = request.form.get('status', '')
         if status not in (db.STATUS_PENDING, db.STATUS_ACTIVE, db.STATUS_DISABLED):
             abort(400)
-        if wallet_address.lower() == current_user.wallet_address and status != db.STATUS_ACTIVE:
+        if username.lower() == current_user.username and status != db.STATUS_ACTIVE:
             return _fragment_error('You cannot disable your own account.')
 
-        db.set_user_status(wallet_address, status)
+        db.set_user_status(username, status)
         audit('admin.user_status_changed', resource_type='User',
-              resource_id=pseudonymize(wallet_address), detail={'status': status})
+              resource_id=pseudonymize(username), detail={'status': status})
         return render_template('admin_user_rows.html', users=db.list_users())
 
-    @app.route('/admin/users/<wallet_address>/role', methods=['POST'])
+    @app.route('/admin/users/<username>/role', methods=['POST'])
     @login_required
     @auth.require_role(db.ROLE_ADMIN)
-    def admin_set_user_role(wallet_address):
+    def admin_set_user_role(username):
         role = request.form.get('role', '')
         if role not in db.ROLES:
             abort(400)
-        if wallet_address.lower() == current_user.wallet_address and role != db.ROLE_ADMIN:
+        if username.lower() == current_user.username and role != db.ROLE_ADMIN:
             return _fragment_error('You cannot remove your own administrator role.')
 
-        db.set_user_role(wallet_address, role)
+        db.set_user_role(username, role)
         audit('admin.user_role_changed', resource_type='User',
-              resource_id=pseudonymize(wallet_address), detail={'role': role})
+              resource_id=pseudonymize(username), detail={'role': role})
         return render_template('admin_user_rows.html', users=db.list_users())
 
     @app.route('/admin/audit')
@@ -758,19 +985,31 @@ def register_cli(app):
     """Operator commands, including the lockout recovery path."""
 
     @app.cli.command('grant-admin')
-    @click.argument('wallet_address')
-    def grant_admin_command(wallet_address):
-        """Make WALLET_ADDRESS an active administrator."""
-        if not is_valid_wallet_address(wallet_address):
+    @click.argument('username')
+    def grant_admin_command(username):
+        """Create or promote USERNAME to an active administrator.
+
+        Prompts for a password interactively, and (re)sets it -- this is the
+        lockout-recovery path, so it must work even if the account already
+        exists and its password is unknown.
+        """
+        username = username.strip().lower()
+        if not is_valid_username(username):
             raise click.ClickException(
-                f'{wallet_address!r} is not a usable wallet address. It must be '
-                '0x followed by 40 hex digits, and cannot be the zero address.'
+                f'{username!r} is not a usable username. It must be '
+                f'{MIN_USERNAME_LENGTH}-{MAX_USERNAME_LENGTH} characters of letters, '
+                'numbers, dots, hyphens or underscores.'
             )
-        record = db.grant_admin(wallet_address)
+        password = click.prompt('Password', hide_input=True, confirmation_prompt=True)
+        if len(password) < MIN_PASSWORD_LENGTH:
+            raise click.ClickException(
+                f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'
+            )
+        record = db.grant_admin(username, auth.hash_password(password))
         db.write_audit('admin.granted_via_cli', 'success',
                        actor='cli', resource_type='User',
-                       resource_id=pseudonymize(record['wallet_address']))
-        click.echo(f"{record['wallet_address']} is now an active administrator.")
+                       resource_id=pseudonymize(record['username']))
+        click.echo(f"{record['username']} is now an active administrator.")
 
     @app.cli.command('list-users')
     def list_users_command():
@@ -779,10 +1018,10 @@ def register_cli(app):
         if not users:
             click.echo('No users registered yet.')
             return
-        click.echo(f"{'WALLET':<44}{'ROLE':<12}{'STATUS':<10}LAST SIGN-IN")
+        click.echo(f"{'USERNAME':<24}{'ROLE':<12}{'STATUS':<10}LAST SIGN-IN")
         for user in users:
             click.echo(
-                f"{user['wallet_address']:<44}{user['role']:<12}"
+                f"{user['username']:<24}{user['role']:<12}"
                 f"{user['status']:<10}{(user['last_login_at'] or 'never')[:19]}"
             )
         click.echo(f'\n{db.count_active_admins()} active administrator(s).')

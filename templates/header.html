@@ -1,19 +1,19 @@
 <header class="bg-dark text-white p-3 mb-4">
-    <div class="container d-flex align-items-center justify-content-between">
-        <div class="d-flex align-items-center">
-            <img src="{{ url_for('static', filename='logo.png') }}" alt="Logo" class="me-3" style="height: 40px;">
-        </div>
+    <div class="container-fluid d-flex align-items-center justify-content-end">
         <div class="d-flex align-items-center gap-2">
+            {% if current_user.is_authenticated %}
+            <span class="navbar-text" id="currentUserDisplay">
+                <i class="fas fa-user-circle me-1"></i>{{ current_user.username }}
+                <span class="badge bg-secondary ms-1">{{ current_user.role }}</span>
+            </span>
             <a href="{{ url_for('ai_settings') }}" class="btn btn-sm btn-outline-info">
                 <i class="fas fa-cog"></i> AI Settings
             </a>
-            {% if current_user.is_authenticated %}
-            <span class="navbar-text" id="currentUserDisplay" title="{{ current_user.wallet_address }}">
-                <i class="fas fa-user-circle me-1"></i>{{ current_user.short_address }}
-                <span class="badge bg-secondary ms-1">{{ current_user.role }}</span>
-            </span>
             <a href="{{ url_for('logout') }}" id="logoutBtn" class="btn btn-sm btn-outline-danger">Logout</a>
             {% else %}
+            <a href="{{ url_for('ai_settings') }}" class="btn btn-sm btn-outline-info">
+                <i class="fas fa-cog"></i> AI Settings
+            </a>
             <a href="{{ url_for('login') }}" class="btn btn-sm btn-outline-primary">Sign in</a>
             {% endif %}
         </div>

@@ -27,24 +27,29 @@ def client(app):
     return app.test_client()
 
 
+TEST_PASSWORD = 'correct horse battery staple'
+
+
 @pytest.fixture
 def active_user(app):
     """An approved account, and a client already signed in as them."""
-    wallet = '0x' + 'a' * 40
+    username = 'activeuser'
     with app.app_context():
-        db.register_pending_user(wallet)
-        db.set_user_status(wallet, db.STATUS_ACTIVE)
-    return wallet
+        import auth
+        db.register_pending_user(username, auth.hash_password(TEST_PASSWORD))
+        db.set_user_status(username, db.STATUS_ACTIVE)
+    return username
 
 
 @pytest.fixture
 def admin_user(app):
-    wallet = '0x' + 'b' * 40
+    username = 'adminuser'
     with app.app_context():
-        db.register_pending_user(wallet)
-        db.set_user_status(wallet, db.STATUS_ACTIVE)
-        db.set_user_role(wallet, db.ROLE_ADMIN)
-    return wallet
+        import auth
+        db.register_pending_user(username, auth.hash_password(TEST_PASSWORD))
+        db.set_user_status(username, db.STATUS_ACTIVE)
+        db.set_user_role(username, db.ROLE_ADMIN)
+    return username
 
 
 @pytest.fixture

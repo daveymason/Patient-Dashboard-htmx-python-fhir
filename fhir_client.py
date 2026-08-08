@@ -9,6 +9,7 @@ Two things this exists to guarantee:
 """
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -79,7 +80,13 @@ class FhirClient:
 
     def get(self, path, params=None):
         """GET a FHIR path. Never raises -- failures come back as FhirResult(ok=False)."""
-        url = f'{self.base_url}/{path.lstrip("/")}'
+        return self._request(f'{self.base_url}/{path.lstrip("/")}', params)
+
+    def _request(self, url, params=None):
+        # Log the URL path only -- slicing len(base_url) garbles upgraded
+        # https pagination URLs, and dropping the query string keeps
+        # patient-scoped search parameters out of the logs.
+        path = urlsplit(url).path or '/'
         try:
             response = self._session.get(url, params=params, timeout=self.timeout)
         except requests.exceptions.Timeout:
@@ -124,16 +131,33 @@ class FhirClient:
     def get_absolute(self, url):
         """Follow an absolute Bundle link (pagination).
 
-        Restricted to the configured base URL. Bundle links are server-supplied
+        Restricted to the configured server. Bundle links are server-supplied
         data, so following one unchecked would turn pagination into a
         server-side request forgery primitive.
+
+        The check is structural rather than a naive string prefix, because real
+        servers mint cursor links that a prefix test wrongly rejects: HAPI
+        answers an http:// deployment with https:// links (an upgrade we allow;
+        a downgrade we do not), and its paging cursors hang the query string
+        directly off the base path with no trailing slash
+        (`.../baseR4?_getpages=...`).
         """
         if not isinstance(url, str) or not url:
             return FhirResult(False, error='Missing pagination link.')
-        if not url.startswith(self.base_url + '/') and url != self.base_url:
+
+        base = urlsplit(self.base_url)
+        target = urlsplit(url)
+        scheme_ok = target.scheme == base.scheme or (
+            base.scheme == 'http' and target.scheme == 'https'
+        )
+        base_path = base.path.rstrip('/')
+        path_ok = target.path.rstrip('/') == base_path or \
+            target.path.startswith(base_path + '/')
+
+        if not (scheme_ok and target.netloc == base.netloc and path_ok):
             logger.warning('Refused to follow off-server pagination link')
             return FhirResult(False, error='Invalid pagination link.')
-        return self.get(url[len(self.base_url):])
+        return self._request(url)
 
     def get_many(self, requests_spec):
         """Run several reads concurrently.

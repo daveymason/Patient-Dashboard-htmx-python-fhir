@@ -5,8 +5,9 @@ import pytest
 import requests
 import responses
 
+import auth
 import db
-from conftest import FHIR_BASE
+from conftest import FHIR_BASE, TEST_PASSWORD
 from config import ConfigError, resolve_secret_key
 from fhir_client import FhirClient
 from logging_setup import pseudonymize
@@ -107,46 +108,76 @@ class TestFhirClient:
         assert result.ok is False
         assert 'invalid' in result.error.lower()
 
+    def test_pagination_link_same_host_different_path_is_refused(self):
+        result = FhirClient(FHIR_BASE).get_absolute(
+            FHIR_BASE.replace('/baseR4', '/adminR4') + '?_getpages=x'
+        )
+        assert result.ok is False
+
+    def test_pagination_link_path_prefix_trick_is_refused(self):
+        """/baseR4-evil must not pass a check meant for /baseR4."""
+        result = FhirClient(FHIR_BASE).get_absolute(
+            FHIR_BASE + '-evil?_getpages=x'
+        )
+        assert result.ok is False
+
+    def test_https_downgrade_is_refused(self):
+        client = FhirClient('https://fhir.test/baseR4')
+        result = client.get_absolute('http://fhir.test/baseR4?_getpages=x')
+        assert result.ok is False
+
     @responses.activate
     def test_pagination_link_on_server_is_followed(self):
         responses.add(responses.GET, f'{FHIR_BASE}/Patient',
                       json={'resourceType': 'Bundle'}, status=200)
         assert FhirClient(FHIR_BASE).get_absolute(f'{FHIR_BASE}/Patient').ok
 
+    @responses.activate
+    def test_real_hapi_cursor_shape_is_followed(self):
+        """HAPI cursors are https with the query hung directly off the base
+        path -- `https://host/baseR4?_getpages=...`, no trailing slash. The
+        old prefix check rejected both properties, so Load More never worked
+        against the live server."""
+        https_base = FHIR_BASE.replace('http://', 'https://')
+        cursor = f'{https_base}?_getpages=46fcdaec&_getpagesoffset=20'
+        responses.add(responses.GET, https_base,
+                      json={'resourceType': 'Bundle'}, status=200)
+        client = FhirClient(FHIR_BASE)  # http base, https cursor: allowed upgrade
+        assert client.get_absolute(cursor).ok
+
 
 class TestInitialAdminBootstrap:
-    """A bad INITIAL_ADMIN_WALLET must not seed an unusable administrator.
+    """A bad INITIAL_ADMIN_USERNAME/PASSWORD must not seed an unusable administrator.
 
-    Seeding the zero address created an 'active admin' nobody could ever sign
-    in as, so every real clinician stayed pending with no one able to approve
-    them -- a bricked install recoverable only by editing SQLite by hand.
+    Seeding a set-but-invalid value silently produced an 'active admin' with
+    no usable credential (or none at all), so every real user stayed pending
+    with nobody able to approve them -- a bricked install recoverable only by
+    editing SQLite by hand.
     """
 
-    def test_zero_address_is_rejected(self):
-        from config import ZERO_ADDRESS, is_valid_wallet_address
-        assert is_valid_wallet_address(ZERO_ADDRESS) is False
-
     @pytest.mark.parametrize('value', [
-        '', '   ', 'not-an-address', '0x123', '0x' + 'z' * 40, '0x' + '0' * 40,
-        '0x' + 'a' * 41, None, 12345,
+        '', '   ', 'ab', 'a' * 65, 'has space', 'weird$char!', None, 12345,
     ])
-    def test_malformed_addresses_are_rejected(self, value):
-        from config import is_valid_wallet_address
-        assert is_valid_wallet_address(value) is False
+    def test_malformed_usernames_are_rejected(self, value):
+        from config import is_valid_username
+        assert is_valid_username(value) is False
 
-    def test_real_address_is_accepted(self):
-        from config import is_valid_wallet_address
-        assert is_valid_wallet_address('0x' + 'a1B2' * 10) is True
+    def test_real_username_is_accepted(self):
+        from config import is_valid_username
+        assert is_valid_username('dr.smith_01') is True
 
-    def test_zero_address_seeds_no_admin(self, tmp_path, monkeypatch):
+    def test_only_one_of_username_password_seeds_no_admin(self, tmp_path, monkeypatch):
         from app import create_app
-        from config import TestConfig, ZERO_ADDRESS
+        from config import TestConfig
 
-        monkeypatch.setenv('INITIAL_ADMIN_WALLET', ZERO_ADDRESS)
+        monkeypatch.setenv('INITIAL_ADMIN_USERNAME', 'onlyusername')
+        monkeypatch.delenv('INITIAL_ADMIN_PASSWORD', raising=False)
 
         class _Config(TestConfig):
-            DATABASE_PATH = str(tmp_path / 'zero.db')
-            INITIAL_ADMIN_WALLET = ''  # what _resolve_initial_admin returns
+            DATABASE_PATH = str(tmp_path / 'incomplete.db')
+            # What _resolve_initial_admin returns when only one is set.
+            INITIAL_ADMIN_USERNAME = ''
+            INITIAL_ADMIN_PASSWORD = ''
 
         application = create_app(_Config)
         with application.app_context():
@@ -154,65 +185,74 @@ class TestInitialAdminBootstrap:
             assert db.count_active_admins() == 0
 
     def test_grant_admin_recovers_a_locked_out_install(self, app):
-        wallet = '0x' + 'e' * 40
+        username = 'recoveryadmin'
         with app.app_context():
             assert db.count_active_admins() == 0
-            record = db.grant_admin(wallet)
+            record = db.grant_admin(username, auth.hash_password(TEST_PASSWORD))
             assert record['role'] == db.ROLE_ADMIN
             assert record['status'] == db.STATUS_ACTIVE
             assert db.count_active_admins() == 1
 
     def test_grant_admin_promotes_an_existing_pending_user(self, app):
-        wallet = '0x' + 'f' * 40
+        username = 'pendingpromote'
         with app.app_context():
-            db.register_pending_user(wallet)
-            assert db.get_user(wallet)['status'] == db.STATUS_PENDING
-            db.grant_admin(wallet)
-            assert db.get_user(wallet)['role'] == db.ROLE_ADMIN
-            assert db.get_user(wallet)['status'] == db.STATUS_ACTIVE
+            db.register_pending_user(username, auth.hash_password(TEST_PASSWORD))
+            assert db.get_user(username)['status'] == db.STATUS_PENDING
+            db.grant_admin(username, auth.hash_password('a-different-password-1'))
+            assert db.get_user(username)['role'] == db.ROLE_ADMIN
+            assert db.get_user(username)['status'] == db.STATUS_ACTIVE
 
-    def test_cli_rejects_an_unusable_address(self, app):
+    def test_cli_rejects_an_unusable_username(self, app):
         runner = app.test_cli_runner()
-        result = runner.invoke(args=['grant-admin', '0x' + '0' * 40])
+        result = runner.invoke(args=['grant-admin', 'ab'])
         assert result.exit_code != 0
-        assert 'not a usable wallet address' in result.output
+        assert 'not a usable username' in result.output
+
+    def test_cli_rejects_a_short_password(self, app):
+        runner = app.test_cli_runner()
+        result = runner.invoke(args=['grant-admin', 'clivalidname'], input='short\nshort\n')
+        assert result.exit_code != 0
+        assert 'at least' in result.output.lower()
 
     def test_cli_grants_and_lists(self, app):
         runner = app.test_cli_runner()
-        wallet = '0x' + 'c' * 40
-        granted = runner.invoke(args=['grant-admin', wallet])
+        username = 'cliadmin'
+        granted = runner.invoke(
+            args=['grant-admin', username],
+            input=f'{TEST_PASSWORD}\n{TEST_PASSWORD}\n',
+        )
         assert granted.exit_code == 0
         assert 'now an active administrator' in granted.output
 
         listed = runner.invoke(args=['list-users'])
-        assert wallet in listed.output
+        assert username in listed.output
         assert '1 active administrator(s)' in listed.output
 
 
 class TestUserStore:
-    def test_new_wallet_lands_as_pending(self, app):
+    def test_new_user_lands_as_pending(self, app):
         with app.app_context():
-            record = db.register_pending_user('0x' + 'd' * 40)
+            record = db.register_pending_user('newuser', auth.hash_password(TEST_PASSWORD))
             assert record['status'] == db.STATUS_PENDING
             assert record['role'] == db.ROLE_VIEWER
 
-    def test_wallet_address_is_normalised(self, app):
+    def test_username_is_normalised(self, app):
         with app.app_context():
-            mixed = '0x' + 'AbCdEf' + '0' * 34
-            db.register_pending_user(mixed)
+            mixed = 'MixedCase.User'
+            db.register_pending_user(mixed, auth.hash_password(TEST_PASSWORD))
             assert db.get_user(mixed.lower()) is not None
             assert db.get_user(mixed.upper()) is not None
 
     def test_unknown_user_is_none(self, app):
         with app.app_context():
-            assert db.get_user('0x' + 'f' * 40) is None
+            assert db.get_user('nobodyhome') is None
             assert db.get_user('') is None
 
 
 class TestAuditLog:
     def test_entries_are_written_and_read(self, app):
         with app.app_context():
-            db.write_audit('patient.view', 'success', actor='0xabc',
+            db.write_audit('patient.view', 'success', actor='testuser',
                            resource_type='Patient', resource_id='ref_123')
             entries = db.read_audit()
             assert len(entries) == 1
@@ -221,7 +261,7 @@ class TestAuditLog:
     def test_log_is_append_only(self, app):
         """Enforced by trigger, so a bug cannot rewrite the trail."""
         with app.app_context():
-            db.write_audit('patient.view', 'success', actor='0xabc')
+            db.write_audit('patient.view', 'success', actor='testuser')
             connection = db.get_connection()
             with pytest.raises(sqlite3.IntegrityError):
                 connection.execute("UPDATE audit_log SET action = 'tampered'")

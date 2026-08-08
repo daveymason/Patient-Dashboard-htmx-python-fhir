@@ -5,7 +5,8 @@ backend is stubbed, so these run offline and deterministically.
 """
 import responses
 
-from conftest import FHIR_BASE, bundle
+import db
+from conftest import FHIR_BASE, TEST_PASSWORD, bundle
 
 
 def _patient(patient_id='p1', **overrides):
@@ -21,7 +22,7 @@ def _patient(patient_id='p1', **overrides):
 
 
 class TestAuthorization:
-    """Signature verification proved identity but granted access to everyone."""
+    """A correct password proves identity; the users table still decides access."""
 
     def test_clinical_routes_require_login(self, client):
         for path in ('/fhir/Patients', '/fhir/Patient/p1', '/fhir/LabResults/p1',
@@ -30,42 +31,76 @@ class TestAuthorization:
             response = client.get(path)
             assert response.status_code in (302, 401), f'{path} was not protected'
 
-    @responses.activate
-    def test_unknown_wallet_cannot_sign_in(self, client, app):
-        """A wallet with a valid signature but no approved account is refused."""
-        from eth_account import Account
-        from eth_account.messages import encode_defunct
+    def test_register_then_login_before_approval_is_refused(self, client):
+        """A freshly registered account cannot sign in until an admin approves it."""
+        register = client.post('/register', data={
+            'username': 'newperson',
+            'password': TEST_PASSWORD,
+            'confirm_password': TEST_PASSWORD,
+        }, follow_redirects=True)
+        # Post/redirect/get: the POST redirects to the login page rather than
+        # rendering it in place, so refresh/Back can't re-submit the form.
+        assert register.status_code == 200
+        assert register.request.path == '/login'
+        assert 'administrator must approve' in register.get_data(as_text=True).lower()
 
-        account = Account.create()
-        address = account.address
-
-        nonce_response = client.get(f'/get_nonce_to_sign/{address}')
-        assert nonce_response.status_code == 200
-        nonce = nonce_response.get_json()['nonce']
-
-        signature = Account.sign_message(
-            encode_defunct(text=nonce), private_key=account.key
-        ).signature.hex()
-        if not signature.startswith('0x'):
-            signature = '0x' + signature
-
-        verify = client.post('/verify_signature', json={
-            'signed_message': signature,
-            'wallet_address': address,
+        login = client.post('/login', data={
+            'username': 'newperson', 'password': TEST_PASSWORD,
         })
-        # Signature is valid, so this is an authorization refusal, not a 401.
-        assert verify.status_code == 403
-        assert verify.get_json()['success'] is False
+        assert login.status_code == 403
+        assert 'awaiting administrator approval' in login.get_data(as_text=True)
 
-    def test_nonce_cannot_be_supplied_by_the_caller(self, client):
-        """Replay guard: the nonce comes from the session, never the body."""
-        response = client.post('/verify_signature', json={
-            'signed_message': '0x' + '00' * 65,
-            'original_nonce': 'attacker-chosen-nonce',
-            'wallet_address': '0x' + 'c' * 40,
+    def test_login_with_wrong_password_is_refused(self, client, active_user):
+        response = client.post('/login', data={
+            'username': active_user, 'password': 'not the right password',
+        })
+        assert response.status_code == 401
+        assert 'incorrect username or password' in response.get_data(as_text=True).lower()
+
+    def test_login_with_correct_password_succeeds(self, client, active_user):
+        response = client.post('/login', data={
+            'username': active_user, 'password': TEST_PASSWORD,
+        }, follow_redirects=False)
+        assert response.status_code == 302
+
+    def test_disabled_account_cannot_sign_in(self, client, app, active_user):
+        with app.app_context():
+            db.set_user_status(active_user, db.STATUS_DISABLED)
+        response = client.post('/login', data={
+            'username': active_user, 'password': TEST_PASSWORD,
+        })
+        assert response.status_code == 403
+        assert 'disabled' in response.get_data(as_text=True).lower()
+
+    def test_registration_rejects_short_password(self, client):
+        response = client.post('/register', data={
+            'username': 'shortpassword', 'password': 'short', 'confirm_password': 'short',
         })
         assert response.status_code == 400
-        assert 'challenge' in response.get_json()['error'].lower()
+        assert 'at least' in response.get_data(as_text=True).lower()
+
+    def test_registration_rejects_mismatched_passwords(self, client):
+        response = client.post('/register', data={
+            'username': 'mismatched', 'password': TEST_PASSWORD,
+            'confirm_password': 'a different password entirely',
+        })
+        assert response.status_code == 400
+        assert 'do not match' in response.get_data(as_text=True).lower()
+
+    def test_registration_rejects_duplicate_username(self, client, active_user):
+        response = client.post('/register', data={
+            'username': active_user, 'password': TEST_PASSWORD,
+            'confirm_password': TEST_PASSWORD,
+        })
+        assert response.status_code == 400
+        assert 'already taken' in response.get_data(as_text=True).lower()
+
+    def test_registration_rejects_invalid_username_characters(self, client):
+        response = client.post('/register', data={
+            'username': 'has a space', 'password': TEST_PASSWORD,
+            'confirm_password': TEST_PASSWORD,
+        })
+        assert response.status_code == 400
 
     def test_admin_routes_reject_non_admin(self, auth_client):
         assert auth_client.get('/admin/users').status_code == 403
@@ -183,7 +218,11 @@ class TestVitalSigns:
             status=200,
         )
         body = auth_client.get('/fhir/VitalSigns/p1').get_data(as_text=True)
-        assert body.index('72') < body.index('61'), 'undated reading sorted as newest'
+        # Restrict to the table: the chart JSON above it also contains both
+        # values, but chronologically ascending (left-to-right on a trend
+        # line), which is the opposite order from the table's newest-first.
+        table = body[body.index('<tbody>'):]
+        assert table.index('72') < table.index('61'), 'undated reading sorted as newest'
 
     @responses.activate
     def test_partial_failure_is_reported(self, auth_client):
