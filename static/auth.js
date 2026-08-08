@@ -1,110 +1,101 @@
-document.addEventListener('DOMContentLoaded', () => {
-    const connectMetamaskBtn = document.getElementById('connectMetamaskBtn');
-    const signInMetamaskBtn = document.getElementById('signInMetamaskBtn');
-    // Assuming a <button id="logoutBtn">Logout</button> exists or will be added in header.html
-    // const logoutBtn = document.getElementById('logoutBtn');
+// MetaMask sign-in.
+//
+// The nonce is issued by the server and held in the session; it is never sent
+// back in the request body, so it cannot be replayed. A valid signature proves
+// control of the wallet -- the server still decides whether that wallet is
+// approved for access.
 
-    let currentAccount = null;
+document.addEventListener('DOMContentLoaded', function () {
+    'use strict';
 
-    // Encapsulate the sign-in logic to be callable
-    async function signInProcess() {
-        if (!currentAccount) {
-            alert('Please connect to Metamask first.'); // Should not happen if called after connect
+    var connectBtn = document.getElementById('connectMetamaskBtn');
+    var statusEl = document.getElementById('authStatus');
+    if (!connectBtn) {
+        return;
+    }
+
+    function setStatus(message, tone) {
+        if (!statusEl) {
             return;
         }
-        try {
-            // 1. Fetch Nonce
-            const nonceResponse = await fetch(`/get_nonce_to_sign/${currentAccount}`);
-            if (!nonceResponse.ok) {
-                const errorData = await nonceResponse.json();
-                alert(`Error fetching nonce: ${errorData.error || nonceResponse.statusText}`);
-                return;
-            }
-            const nonceData = await nonceResponse.json();
-            const nonce = nonceData.nonce;
-            if (!nonce) {
-                alert('Nonce not received from server.');
-                return;
-            }
-            console.log('Nonce received:', nonce);
-
-            // 2. Request Signature
-            const signature = await window.ethereum.request({
-                method: 'personal_sign',
-                params: [nonce, currentAccount],
-            });
-            console.log('Signature received:', signature);
-
-            // 3. Verify Signature
-            const verifyResponse = await fetch('/verify_signature', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    signed_message: signature,
-                    original_nonce: nonce,
-                    wallet_address: currentAccount,
-                }),
-            });
-
-            const verifyData = await verifyResponse.json();
-            if (verifyResponse.ok && verifyData.success) {
-                alert('Successfully signed in!');
-                window.location.reload(); // Reload to reflect login state from server
-            } else {
-                alert(`Sign-in failed: ${verifyData.error || verifyData.message || 'Unknown error'}`);
-            }
-        } catch (error) {
-            console.error('Error during sign-in process:', error);
-            alert(`An error occurred: ${error.message || 'Check console for details.'}`);
-        }
+        statusEl.textContent = message || '';
+        statusEl.className = 'mt-3 small' + (tone ? ' text-' + tone : '');
     }
 
+    function csrfToken() {
+        var meta = document.querySelector('meta[name="csrf-token"]');
+        return meta ? meta.getAttribute('content') : '';
+    }
 
-    if (connectMetamaskBtn) {
-        connectMetamaskBtn.addEventListener('click', async () => {
-            if (typeof window.ethereum !== 'undefined') {
-                try {
-                    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-                    if (accounts.length > 0) {
-                        currentAccount = accounts[0];
-                        console.log('Connected account:', currentAccount);
-                        
-                        // Hide connect button, show and trigger sign-in button
-                        if (connectMetamaskBtn) connectMetamaskBtn.style.display = 'none';
-                        // No longer need to explicitly show signInMetamaskBtn or click it,
-                        // as we will call signInProcess directly.
-                        
-                        await signInProcess(); // Automatically start sign-in
+    function setBusy(busy, label) {
+        connectBtn.disabled = busy;
+        connectBtn.textContent = busy ? label : 'Sign in with MetaMask';
+    }
 
-                    } else {
-                        currentAccount = null;
-                        alert('No accounts found. Please ensure Metamask is set up correctly.');
-                    }
-                } catch (error) {
-                    currentAccount = null;
-                    console.error('Error connecting to Metamask:', error);
-                    alert('Error connecting to Metamask. Check console for details.');
-                }
-            } else {
-                alert('Metamask is not installed. Please install it to use this feature.');
-            }
-            // updateLoginStatusUI(); // Reflect connection status
+    async function signIn(account) {
+        setBusy(true, 'Requesting challenge...');
+        setStatus('');
+
+        var nonceResponse = await fetch('/get_nonce_to_sign/' + encodeURIComponent(account));
+        var nonceData = await nonceResponse.json();
+        if (!nonceResponse.ok || !nonceData.nonce) {
+            setStatus(nonceData.error || 'Could not start sign-in. Please try again.', 'danger');
+            setBusy(false);
+            return;
+        }
+
+        setBusy(true, 'Waiting for signature...');
+        var signature = await window.ethereum.request({
+            method: 'personal_sign',
+            params: [nonceData.nonce, account]
         });
-    }
 
-    if (signInMetamaskBtn) {
-        // Keep the button in the DOM for structure but it won\'t be primary interaction point
-        // signInMetamaskBtn.addEventListener('click', signInProcess); // Original listener
-        // We can remove or hide this button if it is truly redundant now.
-        // For now, let\'s ensure it is hidden if connectMetamaskBtn is also hidden.
-        if (connectMetamaskBtn && connectMetamaskBtn.style.display === 'none') {
-            signInMetamaskBtn.style.display = 'none';
+        setBusy(true, 'Verifying...');
+        var verifyResponse = await fetch('/verify_signature', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrfToken()
+            },
+            body: JSON.stringify({
+                signed_message: signature,
+                wallet_address: account
+            })
+        });
+
+        var verifyData = await verifyResponse.json();
+        if (verifyResponse.ok && verifyData.success) {
+            setStatus('Signed in. Redirecting...', 'success');
+            window.location.assign('/');
+            return;
         }
+
+        setStatus(verifyData.error || 'Sign-in failed.', 'danger');
+        setBusy(false);
     }
 
-    // Initial UI state check (basic)
-    // updateLoginStatusUI(); // More complex logic would be needed if page doesn't reload post-login
-    // For now, the default HTML state (connect visible, sign-in hidden) is the starting point.
+    connectBtn.addEventListener('click', async function () {
+        if (typeof window.ethereum === 'undefined') {
+            setStatus('MetaMask was not detected. Install it to sign in.', 'danger');
+            return;
+        }
+
+        try {
+            var accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+            if (!accounts || accounts.length === 0) {
+                setStatus('No wallet account was made available.', 'danger');
+                return;
+            }
+            await signIn(accounts[0]);
+        } catch (error) {
+            // 4001 is the EIP-1193 code for a user-rejected request.
+            if (error && error.code === 4001) {
+                setStatus('Sign-in cancelled.', 'muted');
+            } else {
+                console.error('Sign-in failed:', error);
+                setStatus('Sign-in could not be completed. Please try again.', 'danger');
+            }
+            setBusy(false);
+        }
+    });
 });

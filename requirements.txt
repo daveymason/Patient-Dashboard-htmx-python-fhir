@@ -1,17 +1,11 @@
-blinker==1.8.2
-certifi==2024.7.4
-charset-normalizer==3.3.2
-click==8.1.7
 Flask==3.0.3
-Flask-Login
-gunicorn==21.2.0
-idna==3.7
-itsdangerous==2.2.0
-Jinja2==3.1.4
-logging==0.4.9.6
-MarkupSafe==2.1.5
+Flask-Login==0.6.3
+Flask-WTF==1.2.1
+Flask-Limiter==3.8.0
+gunicorn==22.0.0
 requests==2.32.3
 urllib3==2.2.2
-Werkzeug==3.0.3
+# Only eth-account is used (signature recovery). The full web3 stack was never
+# imported and pulled in a large dependency tree for nothing.
+eth-account==0.13.4
 openai>=1.0.0
-web3

@@ -3,24 +3,19 @@
         <div class="d-flex align-items-center">
             <img src="{{ url_for('static', filename='logo.png') }}" alt="Logo" class="me-3" style="height: 40px;">
         </div>
-        <div>
-            <button class="btn btn-outline-light" hx-get="/fhir/Patients" hx-target="#content">
-                <i class="fas fa-users"></i> Patients
-            </button>
-            <button class="btn btn-outline-light" hx-get="/fhir/Demographics" hx-target="#content">
-                <i class="fas fa-chart-pie"></i> Demographics
-            </button>
-            <a href="{{ url_for('ai_settings') }}" class="btn btn-outline-info ms-2">
+        <div class="d-flex align-items-center gap-2">
+            <a href="{{ url_for('ai_settings') }}" class="btn btn-sm btn-outline-info">
                 <i class="fas fa-cog"></i> AI Settings
             </a>
-            {% if not current_user.is_authenticated %}
-            <button id="connectMetamaskBtn" class="btn btn-outline-primary ms-2">Connect to Metamask</button>
-            <button id="signInMetamaskBtn" class="btn btn-outline-success ms-2" style="display:none;">Sign In with Metamask</button>
+            {% if current_user.is_authenticated %}
+            <span class="navbar-text" id="currentUserDisplay" title="{{ current_user.wallet_address }}">
+                <i class="fas fa-user-circle me-1"></i>{{ current_user.short_address }}
+                <span class="badge bg-secondary ms-1">{{ current_user.role }}</span>
+            </span>
+            <a href="{{ url_for('logout') }}" id="logoutBtn" class="btn btn-sm btn-outline-danger">Logout</a>
             {% else %}
-            <span class="navbar-text ms-2" id="currentUserDisplay">Signed in</span>
-            <a href="{{ url_for('logout') }}" id="logoutBtn" class="btn btn-outline-danger ms-2">Logout</a>
+            <a href="{{ url_for('login') }}" class="btn btn-sm btn-outline-primary">Sign in</a>
             {% endif %}
         </div>
     </div>
 </header>
-<script src="{{ url_for('static', filename='auth.js') }}" defer></script>

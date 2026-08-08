@@ -1,12 +1,13 @@
-{% if vital_signs %}
-<div class="row">
-    <div class="col-md-12">
-        <h5 class="text-muted">Vital Signs</h5>
-    </div>
+{% if error %}
+<div class="alert alert-danger mb-3">
+    <i class="fas fa-exclamation-triangle me-2"></i>
+    <strong>Some vital signs could not be loaded.</strong> {{ error }}
 </div>
+{% endif %}
 
-<div class="table-responsive mt-3">
-    <table class="table table-sm table-striped">
+{% if vital_signs %}
+<div class="table-responsive">
+    <table class="table table-sm table-striped mb-0">
         <thead class="table-light">
             <tr>
                 <th>Date</th>
@@ -27,7 +28,7 @@
                     {% if vs.status == 'final' %}
                     <span class="badge bg-success">Final</span>
                     {% else %}
-                    <span class="badge bg-warning text-dark">{{ vs.status }}</span>
+                    <span class="badge bg-warning text-dark">{{ vs.status|capitalize }}</span>
                     {% endif %}
                 </td>
             </tr>
@@ -35,9 +36,8 @@
         </tbody>
     </table>
 </div>
-
-{% else %}
-<div class="alert alert-info">
-    <i class="fas fa-info-circle"></i> No vital signs data available for this patient.
+{% elif not error %}
+<div class="alert alert-info mb-0">
+    <i class="fas fa-info-circle me-2"></i> No vital signs recorded for this patient.
 </div>
 {% endif %}
