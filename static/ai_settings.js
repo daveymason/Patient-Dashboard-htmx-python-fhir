@@ -1,16 +1,10 @@
 document.addEventListener('DOMContentLoaded', function () {
     'use strict';
 
-    var apiKeyInput = document.getElementById('openaiApiKey');
-    var testButton = document.getElementById('testApiKeyBtn');
-    var resultDiv = document.getElementById('apiKeyTestResult');
-    if (!testButton || !apiKeyInput || !resultDiv) {
+    var testButton = document.getElementById('testProviderBtn');
+    var resultDiv = document.getElementById('providerTestResult');
+    if (!testButton || !resultDiv) {
         return;
-    }
-
-    function setResult(message, tone) {
-        resultDiv.textContent = message;
-        resultDiv.className = 'mt-3 ' + (tone ? 'text-' + tone : '');
     }
 
     function csrfToken() {
@@ -18,30 +12,60 @@ document.addEventListener('DOMContentLoaded', function () {
         return meta ? meta.getAttribute('content') : '';
     }
 
-    testButton.addEventListener('click', async function () {
-        var apiKey = apiKeyInput.value.trim();
-        if (!apiKey) {
-            setResult('Enter an API key first.', 'danger');
-            return;
-        }
+    // Built as DOM nodes rather than an innerHTML string: model IDs come back
+    // from the provider, and concatenating them into markup would make a
+    // hostile or malformed ID an injection point on an admin-only page.
+    function render(data) {
+        resultDiv.textContent = '';
 
+        var line = document.createElement('div');
+        line.className = data.ok ? 'text-success' : 'text-danger';
+        line.textContent = data.message || 'Unexpected response.';
+        resultDiv.appendChild(line);
+
+        if (data.suggestions && data.suggestions.length) {
+            var hint = document.createElement('div');
+            hint.className = 'form-text mt-2';
+            hint.textContent = 'Available on this account:';
+            resultDiv.appendChild(hint);
+
+            var list = document.createElement('ul');
+            list.className = 'form-text mb-0 ps-3';
+            data.suggestions.forEach(function (id) {
+                var item = document.createElement('li');
+                var code = document.createElement('code');
+                code.textContent = id;
+                item.appendChild(code);
+                list.appendChild(item);
+            });
+            resultDiv.appendChild(list);
+        }
+    }
+
+    function setPlainMessage(message, tone) {
+        resultDiv.textContent = '';
+        var line = document.createElement('div');
+        line.className = tone ? 'text-' + tone : '';
+        line.textContent = message;
+        resultDiv.appendChild(line);
+    }
+
+    testButton.addEventListener('click', async function () {
         testButton.disabled = true;
-        setResult('Checking...', 'muted');
+        setPlainMessage('Checking...', 'muted');
 
         try {
-            var response = await fetch('/test_openai_key', {
+            var response = await fetch('/settings/ai/test', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': csrfToken()
-                },
-                body: JSON.stringify({ api_key: apiKey })
+                headers: { 'X-CSRFToken': csrfToken() }
             });
-            var data = await response.json();
-            setResult(data.message || 'Unexpected response.', data.success ? 'success' : 'danger');
+            render(await response.json());
         } catch (error) {
-            console.error('Key test failed:', error);
-            setResult('The key could not be checked. Check your connection and try again.', 'danger');
+            console.error('Provider check failed:', error);
+            setPlainMessage(
+                'The provider could not be checked. Check your connection and try again.',
+                'danger'
+            );
         } finally {
             testButton.disabled = false;
         }

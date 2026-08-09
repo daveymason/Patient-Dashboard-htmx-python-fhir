@@ -1,3 +1,6 @@
 -r requirements.txt
 pytest==8.3.3
 responses==0.25.3
+# Used to construct real openai exception objects in the provider tests.
+# Pinned explicitly rather than relied on as an openai transitive dependency.
+httpx==0.28.1

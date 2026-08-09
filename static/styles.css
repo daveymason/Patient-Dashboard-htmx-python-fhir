@@ -41,6 +41,14 @@ body {
     background-color: var(--tropical-dark) !important;
 }
 
+/* Bootstrap's .bg-light / .bg-white replace the background set above but not
+   the colour, which left white heading text on a near-white header -- the
+   "Lab Results", "Medications" and "Allergies" panel titles were invisible. */
+.card-header.bg-light,
+.card-header.bg-white {
+    color: var(--tropical-dark);
+}
+
 .card-header.bg-primary {
     background-color: var(--tropical-primary) !important;
 }
