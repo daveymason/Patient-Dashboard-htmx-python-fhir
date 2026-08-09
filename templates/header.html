@@ -6,14 +6,15 @@
                 <i class="fas fa-user-circle me-1"></i>{{ current_user.username }}
                 <span class="badge bg-secondary ms-1">{{ current_user.role }}</span>
             </span>
+            {# AI settings is admin-only, so the link is hidden rather than
+               rendered into a 403 -- same pattern as the sidebar admin links. #}
+            {% if current_user.is_admin %}
             <a href="{{ url_for('ai_settings') }}" class="btn btn-sm btn-outline-info">
                 <i class="fas fa-cog"></i> AI Settings
             </a>
+            {% endif %}
             <a href="{{ url_for('logout') }}" id="logoutBtn" class="btn btn-sm btn-outline-danger">Logout</a>
             {% else %}
-            <a href="{{ url_for('ai_settings') }}" class="btn btn-sm btn-outline-info">
-                <i class="fas fa-cog"></i> AI Settings
-            </a>
             <a href="{{ url_for('login') }}" class="btn btn-sm btn-outline-primary">Sign in</a>
             {% endif %}
         </div>

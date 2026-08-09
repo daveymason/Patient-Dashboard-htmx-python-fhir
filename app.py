@@ -19,10 +19,11 @@ from flask_wtf.csrf import CSRFProtect
 
 import auth
 import db
+from ai import provider as ai_provider
 from charts import demographics_charts, vitals_charts
 from config import (
     ConfigError, MAX_USERNAME_LENGTH, MIN_PASSWORD_LENGTH, MIN_USERNAME_LENGTH,
-    is_valid_username, resolve_secret_key, select_config,
+    ai_blocked_reason, is_valid_username, resolve_secret_key, select_config,
 )
 from fhir_client import FhirClient
 from fhir_utils import (
@@ -873,41 +874,42 @@ def register_routes(app):
 
     # -- settings ----------------------------------------------------------
 
+    # Admin-only: the page reports deployment configuration (the FHIR backend,
+    # the model, whether a key is present), which is the same information
+    # HEALTH_SHOW_BACKEND deliberately keeps off the public health probe.
     @app.route('/settings/ai')
     @login_required
+    @auth.require_role(db.ROLE_ADMIN)
     def ai_settings():
-        return render_template('ai_settings.html')
+        return render_template(
+            'ai_settings.html',
+            model=app.config['AI_MODEL'],
+            key_configured=bool(app.config['OPENAI_API_KEY']),
+            fhir_server=app.config['FHIR_SERVER_URL'],
+            blocked_reason=ai_blocked_reason(
+                app.config['FHIR_SERVER_URL'], app.config['AI_ALLOW_REAL_PHI'],
+            ),
+        )
 
-    @app.route('/test_openai_key', methods=['POST'])
+    @app.route('/settings/ai/test', methods=['POST'])
     @login_required
+    @auth.require_role(db.ROLE_ADMIN)
     @limiter.limit('5 per minute')
-    def test_openai_key():
-        api_key = (request.get_json(silent=True) or {}).get('api_key')
-        if not api_key:
-            return jsonify({'success': False, 'message': 'An API key is required.'}), 400
-
-        try:
-            import openai
-        except ImportError:
-            return jsonify({'success': False,
-                            'message': 'The openai package is not installed.'}), 500
-
-        try:
-            openai.OpenAI(api_key=api_key).models.list()
-        except openai.AuthenticationError:
-            return jsonify({'success': False,
-                            'message': 'That key was rejected as invalid or expired.'}), 401
-        except openai.APIError as exc:
-            logger.warning('OpenAI key test failed: %s', type(exc).__name__)
-            return jsonify({'success': False,
-                            'message': 'The AI provider returned an error.'}), 502
-        except Exception:
-            logger.exception('Unexpected error testing the OpenAI key')
-            return jsonify({'success': False,
-                            'message': 'The key could not be checked. Try again.'}), 500
-
-        audit('settings.ai_key_tested')
-        return jsonify({'success': True, 'message': 'Key accepted.'})
+    def test_ai_provider():
+        """Check the configured key and model. Sends no patient data."""
+        status = ai_provider.from_config(app.config).check()
+        audit('settings.ai_provider_tested',
+              outcome='success' if status.ok else 'failure',
+              detail={'model': status.model, 'model_available': status.model_available})
+        return jsonify({
+            'ok': status.ok,
+            'message': status.message,
+            'model': status.model,
+            'key_configured': status.key_configured,
+            'key_valid': status.key_valid,
+            'model_available': status.model_available,
+            'suggestions': status.suggestions,
+        })
 
     # -- administration ----------------------------------------------------
 
@@ -1010,6 +1012,30 @@ def register_cli(app):
                        actor='cli', resource_type='User',
                        resource_id=pseudonymize(record['username']))
         click.echo(f"{record['username']} is now an active administrator.")
+
+    @app.cli.command('reset-password')
+    @click.argument('username')
+    def reset_password_command(username):
+        """Reset USERNAME's password, leaving their role and status alone.
+
+        `grant-admin` also promotes, so it is the wrong tool for an ordinary
+        forgotten password -- it would hand the account administrator rights
+        as a side effect.
+        """
+        username = username.strip().lower()
+        password = click.prompt('New password', hide_input=True, confirmation_prompt=True)
+        if len(password) < MIN_PASSWORD_LENGTH:
+            raise click.ClickException(
+                f'Password must be at least {MIN_PASSWORD_LENGTH} characters.'
+            )
+        record = db.set_password(username, auth.hash_password(password))
+        if record is None:
+            raise click.ClickException(f'No account called {username!r}.')
+        db.write_audit('user.password_reset_via_cli', 'success',
+                       actor='cli', resource_type='User',
+                       resource_id=pseudonymize(record['username']))
+        click.echo(f"Password reset for {record['username']} "
+                   f"(role {record['role']}, status {record['status']} -- unchanged).")
 
     @app.cli.command('list-users')
     def list_users_command():

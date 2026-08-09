@@ -71,6 +71,42 @@ BEFORE DELETE ON audit_log
 BEGIN
     SELECT RAISE(ABORT, 'audit_log is append-only');
 END;
+
+-- Every exchange with a model, kept so a bad answer can be investigated after
+-- the fact: which patient, which prompt, which model, what it said. Without
+-- this a clinician reporting "the assistant told me the wrong thing" leaves
+-- nothing to examine. Separate from audit_log because the columns are
+-- different and the retention decision will be too.
+CREATE TABLE IF NOT EXISTS ai_exchange (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at   TEXT NOT NULL,
+    actor         TEXT NOT NULL,
+    patient_ref   TEXT NOT NULL,
+    feature       TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    prompt_hash   TEXT NOT NULL,
+    prompt_version TEXT,
+    deidentified  INTEGER NOT NULL DEFAULT 0,
+    input_tokens  INTEGER,
+    output_tokens INTEGER,
+    response      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_exchange_occurred_at ON ai_exchange(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_ai_exchange_actor       ON ai_exchange(actor);
+CREATE INDEX IF NOT EXISTS idx_ai_exchange_patient     ON ai_exchange(patient_ref);
+
+CREATE TRIGGER IF NOT EXISTS ai_exchange_no_update
+BEFORE UPDATE ON ai_exchange
+BEGIN
+    SELECT RAISE(ABORT, 'ai_exchange is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS ai_exchange_no_delete
+BEFORE DELETE ON ai_exchange
+BEGIN
+    SELECT RAISE(ABORT, 'ai_exchange is append-only');
+END;
 """
 
 
@@ -244,6 +280,23 @@ def count_active_admins():
     return row['n'] if row else 0
 
 
+def set_password(username, password_hash):
+    """Reset one account's credential, leaving role and status untouched.
+
+    Distinct from `grant_admin`, which also promotes: using that to reset a
+    clinician's forgotten password would silently make them an administrator.
+    Returns the updated user, or None if no such account exists.
+    """
+    username = username.strip().lower()
+    connection = get_connection()
+    cursor = connection.execute(
+        'UPDATE users SET password_hash = ? WHERE username = ?',
+        (password_hash, username),
+    )
+    connection.commit()
+    return get_user(username) if cursor.rowcount else None
+
+
 def grant_admin(username, password_hash):
     """Create or promote a user to an active administrator, (re)setting
     their password.
@@ -292,6 +345,61 @@ def write_audit(action, outcome, actor=None, resource_type=None, resource_id=Non
         connection.commit()
     except sqlite3.Error:
         logger.exception('Failed to write audit entry for action=%s', action)
+
+
+def write_ai_exchange(actor, patient_ref, feature, model, prompt_hash, response,
+                      prompt_version=None, deidentified=False,
+                      input_tokens=None, output_tokens=None):
+    """Append one model exchange to the review trail.
+
+    `patient_ref` must already be pseudonymised by the caller -- this table is
+    read by whoever is investigating a complaint, which is not the same
+    audience as the record itself.
+
+    Like `write_audit`, a failure here is logged rather than raised: losing the
+    trail is bad, but taking a clinician's screen down because a log write
+    failed is worse. Returns the new row id, or None if it could not be
+    written, so a caller that wants to react has something to check.
+    """
+    try:
+        connection = get_connection()
+        cursor = connection.execute(
+            'INSERT INTO ai_exchange'
+            ' (occurred_at, actor, patient_ref, feature, model, prompt_hash,'
+            '  prompt_version, deidentified, input_tokens, output_tokens, response)'
+            ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                _utcnow(), actor, patient_ref, feature, model, prompt_hash,
+                prompt_version, 1 if deidentified else 0,
+                input_tokens, output_tokens, response,
+            ),
+        )
+        connection.commit()
+        return cursor.lastrowid
+    except sqlite3.Error:
+        logger.exception('Failed to record AI exchange for feature=%s', feature)
+        return None
+
+
+def read_ai_exchange(limit=100, actor=None, patient_ref=None, feature=None):
+    query = 'SELECT * FROM ai_exchange'
+    clauses, params = [], []
+    if actor:
+        clauses.append('actor = ?')
+        params.append(actor)
+    if patient_ref:
+        clauses.append('patient_ref = ?')
+        params.append(patient_ref)
+    if feature:
+        clauses.append('feature = ?')
+        params.append(feature)
+    if clauses:
+        query += ' WHERE ' + ' AND '.join(clauses)
+    query += ' ORDER BY id DESC LIMIT ?'
+    params.append(limit)
+
+    rows = get_connection().execute(query, params).fetchall()
+    return [dict(row) for row in rows]
 
 
 def read_audit(limit=100, actor=None, resource_id=None):

@@ -125,6 +125,12 @@ fixed in the hardening pass.
 | `LOG_JSON` | No | `true` | Structured JSON logs. |
 | `HEALTH_SHOW_BACKEND` | No | `false` | Expose the FHIR URL on `/health`. |
 | `RATELIMIT_AUTH` | No | `10 per minute` | Limit on auth endpoints. |
+| `OPENAI_API_KEY` | No | — | AI provider key. Environment only — never stored in the database. |
+| `AI_MODEL` | No | `gpt-5.6-luna` | Model ID. Verify it against your account on the AI Settings page. |
+| `AI_REASONING_EFFORT` | No | `low` | `none`…`max`. Reasoning tokens bill at the output rate, so this is the cost lever. Blank omits the parameter. |
+| `AI_ALLOW_REAL_PHI` | No | `false` | Permits AI against a non-demo FHIR server. Requires a BAA/DPIA. |
+| `AI_DEIDENTIFY` | No | `auto` | Withholds name, address, contact and record numbers from model context. `auto` = on unless the FHIR server is a known synthetic one. |
+| `AI_CONTEXT_TOKEN_CEILING` | No | `120000` | Above this, a record is curated rather than sent whole. Allergies are never dropped. |
 
 Running multiple gunicorn workers **requires** a stable `SECRET_KEY` — otherwise
 each worker signs cookies with a different key and sign-in fails intermittently.
@@ -143,6 +149,14 @@ each worker signs cookies with a different key and sign-in fails intermittently.
 | `auth.py` | Username/password sign-in and roles |
 | `db.py` | SQLite user store and append-only audit log |
 | `logging_setup.py` | JSON logging with identifiers pseudonymised |
+
+---
+
+## 🗺️ Roadmap
+
+[docs/PROJECT-PLAN.md](docs/PROJECT-PLAN.md) is the single planning document —
+phases in build order, with task checklists, technical detail, a risk register
+and the verified FHIR and model facts behind the decisions.
 
 ---
 

@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 
 class ConfigError(RuntimeError):
@@ -85,6 +86,71 @@ def _resolve_initial_admin():
     return username, password
 
 
+# FHIR servers whose contents are public synthetic data, safe to send to a
+# third-party model provider with no agreement in place.
+DEMO_FHIR_HOSTS = frozenset({'hapi.fhir.org'})
+
+# Reasoning levels gpt-5.6-luna accepts. Validated before use so a typo shows
+# up at boot rather than as a rejected request on a clinician's first click.
+AI_REASONING_LEVELS = ('none', 'low', 'medium', 'high', 'xhigh', 'max')
+
+# Above this many input tokens the provider reprices the *whole* request at 2x
+# input and 1.5x output, so it is a cliff rather than a gradient. Measured
+# against the demo server, a complete patient record is ~19K tokens, so this
+# is a guard for outlier histories, not a routine constraint.
+AI_INPUT_TOKEN_CLIFF = 272_000
+
+
+def is_demo_fhir_host(fhir_server_url):
+    """True if this URL points at a server holding public synthetic data.
+
+    Compares the parsed hostname rather than substring-matching the URL, so
+    `hapi.fhir.org.evil.test` does not pass as the demo server.
+    """
+    host = (urlsplit(fhir_server_url or '').hostname or '').lower()
+    return host in DEMO_FHIR_HOSTS
+
+
+def deidentify_enabled(setting, fhir_server_url):
+    """Whether patient context must be de-identified before it leaves the app.
+
+    Tri-state rather than a boolean. 'auto' -- the default -- turns
+    de-identification on the moment the configured server is not a known
+    synthetic one, so the safe behaviour is what you get by forgetting to
+    configure it. An operator can still force it on for the demo server (useful
+    for demonstrating the pass) or off for a real one, but off is then an
+    explicit, recorded decision rather than an oversight.
+    """
+    value = (setting or 'auto').strip().lower()
+    if value in ('1', 'true', 'yes', 'on', 'always'):
+        return True
+    if value in ('0', 'false', 'no', 'off', 'never'):
+        return False
+    return not is_demo_fhir_host(fhir_server_url)
+
+
+def ai_blocked_reason(fhir_server_url, allow_real_phi):
+    """Why AI features must stay off for this deployment, or None if allowed.
+
+    A note in a document saying "demo only" does not stop anyone pointing
+    FHIR_SERVER_URL at a real server with AI switched on, so the rule is
+    enforced instead of written down: patient data only reaches a model
+    provider when it came from a known-synthetic server, unless the operator
+    explicitly accepts responsibility with AI_ALLOW_REAL_PHI.
+    """
+    if allow_real_phi:
+        return None
+    if is_demo_fhir_host(fhir_server_url):
+        return None
+    host = (urlsplit(fhir_server_url or '').hostname or '').lower()
+    return (
+        f'AI features are disabled because {host or "this FHIR server"} is not '
+        'a known synthetic-data server. Real patient data must not reach a '
+        'model provider without a BAA (US) or processor agreement and DPIA '
+        '(UK/EU) in place. Set AI_ALLOW_REAL_PHI=true only once that exists.'
+    )
+
+
 class Config:
     """Base configuration shared by every environment."""
 
@@ -121,6 +187,38 @@ class Config:
 
     RATELIMIT_STORAGE_URI = os.environ.get('RATELIMIT_STORAGE_URI', 'memory://')
     RATELIMIT_AUTH = os.environ.get('RATELIMIT_AUTH', '10 per minute')
+
+    # -- AI provider -------------------------------------------------------
+    # The key is read from the environment rather than stored in the database:
+    # the SQLite file is unencrypted at rest (see SECURITY.md), so the one
+    # secret that most needs protecting is the last thing that should live
+    # there. This also keeps it compatible with a real secret manager.
+    OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
+    # The model ID is configuration, never a literal in code: providers rename
+    # and retire models, so a wrong or outdated ID must be fixable without a
+    # code change. Whatever is set here is verified against the account's real
+    # model list on the AI settings page -- see ai/provider.py.
+    AI_MODEL = os.environ.get('AI_MODEL', 'gpt-5.6-luna')
+    AI_REQUEST_TIMEOUT = float(os.environ.get('AI_REQUEST_TIMEOUT', '60'))
+    AI_ALLOW_REAL_PHI = _flag('AI_ALLOW_REAL_PHI', default=False)
+
+    # Reasoning tokens bill at the output rate, which makes this -- not context
+    # size -- the real cost lever on gpt-5.6-luna. Summarising a problem list
+    # or cross-checking an allergy list is retrieval and restatement, not deep
+    # reasoning, so the default is deliberately low. Blank omits the parameter
+    # entirely, which is the escape hatch if a model rejects it.
+    AI_REASONING_EFFORT = os.environ.get('AI_REASONING_EFFORT', 'low').strip().lower()
+
+    # 'auto' (default) de-identifies whenever FHIR_SERVER_URL is not a known
+    # synthetic-data server; 'true'/'false' force it either way.
+    AI_DEIDENTIFY = os.environ.get('AI_DEIDENTIFY', 'auto').strip().lower()
+
+    # The point at which a patient record stops being sent whole and starts
+    # being curated. A complete record measures ~19K tokens on the demo server,
+    # so this is not a routine limit -- it is a guard against the outlier
+    # history, sitting far enough below AI_INPUT_TOKEN_CLIFF (272K) that the
+    # estimate can be badly wrong without triggering the repricing cliff.
+    AI_CONTEXT_TOKEN_CEILING = int(os.environ.get('AI_CONTEXT_TOKEN_CEILING', '120000'))
 
     LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
     LOG_JSON = _flag('LOG_JSON', default=True)
