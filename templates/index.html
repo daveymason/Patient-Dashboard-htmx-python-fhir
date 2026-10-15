@@ -21,7 +21,7 @@
     <div class="main-content">
         <div class="content-wrapper">
             <div class="container-fluid">
-                <div id="content" class="fade-me-in" hx-get="{{ initial_view }}" hx-trigger="load" hx-swap="innerHTML transition:true">
+                <div id="content" class="fade-me-in" hx-get="{{ initial_view }}" hx-trigger="load" hx-swap="innerHTML">
                     <div class="d-flex justify-content-center mt-5">
                         <div class="spinner-border text-primary" role="status">
                             <span class="visually-hidden">Loading...</span>
@@ -37,5 +37,6 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
     <script src="{{ url_for('static', filename='htmx-setup.js') }}"></script>
     <script src="{{ url_for('static', filename='charts.js') }}"></script>
+{% include "intake_modal.html" %}
 </body>
 </html>

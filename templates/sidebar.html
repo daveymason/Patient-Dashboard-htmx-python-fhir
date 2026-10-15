@@ -1,14 +1,13 @@
 {# Shared sidebar. Two shells include this:
-
    - index.html (the SPA shell) sets spa_shell=true: nav links carry hx-get and
      swap fragments into #content without a page load.
    - base.html (admin / settings / error pages) has no #content element, so the
      hx-* attributes are omitted there and the links fall back to their real
      hrefs -- a normal navigation to "/?view=...", which the index route turns
-     into the right initial fragment. Without this split the links were dead on
-     every base.html page: htmx cancelled the click, then failed to find its
-     target. #}
+     into the right initial fragment. #}
 {% set nav_views = [
+    ('triage', '/fhir/Triage', 'fas fa-ambulance text-danger', 'Live Triage'),
+    ('pipeline', '/pipeline/status', 'fas fa-cogs text-info', 'Pipeline Status'),
     ('patients', '/fhir/Patients', 'fas fa-users', 'Patients'),
     ('stats', '/fhir/Demographics', 'fas fa-chart-pie', 'Stats'),
     ('insights', '/fhir/Dashboard', 'fas fa-chart-bar', 'Insights'),
@@ -21,10 +20,10 @@
         <ul class="nav flex-column">
             {% for key, fragment_url, icon, label in nav_views %}
             <li class="nav-item">
-                <a class="nav-link" href="/?view={{ key }}"
-                   {% if spa_shell %}hx-get="{{ fragment_url }}" hx-target="#content" hx-indicator="this" hx-swap="innerHTML transition:true"{% endif %}>
-                    <i class="{{ icon }}"></i>
-                    <span> {{ label }}</span>
+                <a class="nav-link" href="/?view={{ key }}" data-view="{{ key }}"
+                   {% if spa_shell %}hx-get="{{ fragment_url }}" hx-push-url="/?view={{ key }}" hx-target="#content" hx-swap="innerHTML"{% endif %}>
+                    <i class="{{ icon }} fa-fw"></i>
+                    <span>{{ label }}</span>
                 </a>
             </li>
             {% endfor %}
@@ -32,24 +31,18 @@
             <li class="nav-item">
                 <a class="nav-link {% if request.endpoint == 'admin_users' %}active{% endif %}"
                    href="{{ url_for('admin_users') }}">
-                    <i class="fas fa-user-shield"></i>
-                    <span> Users</span>
+                    <i class="fas fa-user-shield fa-fw"></i>
+                    <span>Users</span>
                 </a>
             </li>
             <li class="nav-item">
                 <a class="nav-link {% if request.endpoint == 'admin_audit' %}active{% endif %}"
                    href="{{ url_for('admin_audit') }}">
-                    <i class="fas fa-clipboard-check"></i>
-                    <span> Audit Log</span>
+                    <i class="fas fa-clipboard-check fa-fw"></i>
+                    <span>Audit Log</span>
                 </a>
             </li>
             {% endif %}
-            <li class="nav-item">
-                <a class="nav-link" href="https://github.com/daveymason/Patient-Dashboard-htmx-python-fhir" target="_blank" rel="noopener noreferrer">
-                    <i class="fab fa-github"></i>
-                    <span> The Code</span>
-                </a>
-            </li>
         </ul>
     </div>
 </nav>
