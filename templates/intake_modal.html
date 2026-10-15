@@ -1,0 +1,175 @@
+<!-- Patient Intake & Data Ingestion Modal -->
+<div class="modal fade" id="intakeModal" tabindex="-1" aria-labelledby="intakeModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content shadow-lg border-0">
+            <div class="modal-header bg-dark text-white py-3">
+                <h5 class="modal-title d-flex align-items-center" id="intakeModalLabel">
+                    <i class="fas fa-ambulance text-danger me-2"></i> Clinical Patient Intake &amp; Ingestion
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body p-4">
+                <!-- Nav Tabs: Manual Entry vs File Upload -->
+                <ul class="nav nav-pills nav-fill mb-3" id="intakeTabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active fw-bold" id="manual-tab" data-bs-toggle="pill" data-bs-target="#manual-pane" type="button" role="tab" aria-controls="manual-pane" aria-selected="true">
+                            <i class="fas fa-user-edit me-1"></i> Fast Triage Intake Form
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link fw-bold" id="upload-tab" data-bs-toggle="pill" data-bs-target="#upload-pane" type="button" role="tab" aria-controls="upload-pane" aria-selected="false">
+                            <i class="fas fa-file-upload me-1"></i> Batch Clinical File Upload
+                        </button>
+                    </li>
+                </ul>
+
+                <div class="tab-content" id="intakeTabsContent">
+                    <!-- Tab 1: Manual Triage Intake -->
+                    <div class="tab-pane fade show active" id="manual-pane" role="tabpanel" aria-labelledby="manual-tab">
+                        <form hx-post="/fhir/intake" hx-target="#intake-result" hx-encoding="multipart/form-data" hx-indicator="#intake-spinner">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                            <div class="row g-3 mb-3">
+                                <div class="col-md-6">
+                                    <label class="form-label fw-semibold small">Full Name <span class="text-danger">*</span></label>
+                                    <input type="text" name="full_name" class="form-control" placeholder="e.g. John O'Connor" required>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label fw-semibold small">Irish GMS / PPS Number</label>
+                                    <input type="text" name="gms_number" class="form-control" placeholder="e.g. 99482-A (leave blank to auto-generate)">
+                                </div>
+                            </div>
+
+                            <div class="row g-3 mb-3">
+                                <div class="col-md-6">
+                                    <label class="form-label fw-semibold small">Gender</label>
+                                    <select name="gender" class="form-select">
+                                        <option value="male">Male</option>
+                                        <option value="female">Female</option>
+                                        <option value="other">Other</option>
+                                        <option value="unknown">Unknown</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label fw-semibold small">Date of Birth</label>
+                                    <input type="date" name="dob" class="form-control">
+                                </div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label fw-semibold small">Chief Complaint / Presenting Symptoms <span class="text-danger">*</span></label>
+                                <input type="text" name="complaint" class="form-control" placeholder="e.g. Severe acute crushing chest pain with dyspnea" required>
+                                <div class="form-text text-muted small"><i class="fas fa-info-circle me-1"></i>Mapped deterministically to SNOMED-CT clinical terminology.</div>
+                            </div>
+
+                            <div class="card bg-light border-0 p-3 mb-3">
+                                <div class="fw-bold small text-uppercase text-secondary mb-2">
+                                    <i class="fas fa-heartbeat text-danger me-1"></i> Physiological Triage Vitals (MTS Discriminators)
+                                </div>
+                                <div class="row g-2">
+                                    <div class="col-md-4 col-6">
+                                        <label class="form-label small text-muted mb-1">Sys BP (mmHg)</label>
+                                        <input type="number" name="sys_bp" class="form-control form-control-sm" placeholder="120">
+                                    </div>
+                                    <div class="col-md-4 col-6">
+                                        <label class="form-label small text-muted mb-1">Dia BP (mmHg)</label>
+                                        <input type="number" name="dia_bp" class="form-control form-control-sm" placeholder="80">
+                                    </div>
+                                    <div class="col-md-4 col-6">
+                                        <label class="form-label small text-muted mb-1">Heart Rate (bpm)</label>
+                                        <input type="number" name="hr" class="form-control form-control-sm" placeholder="78">
+                                    </div>
+                                    <div class="col-md-4 col-6">
+                                        <label class="form-label small text-muted mb-1">SpO2 (%)</label>
+                                        <input type="number" name="spo2" class="form-control form-control-sm" placeholder="98">
+                                    </div>
+                                    <div class="col-md-4 col-6">
+                                        <label class="form-label small text-muted mb-1">Resp Rate (/min)</label>
+                                        <input type="number" name="resp_rate" class="form-control form-control-sm" placeholder="16">
+                                    </div>
+                                    <div class="col-md-4 col-6">
+                                        <label class="form-label small text-muted mb-1">Temp (°C)</label>
+                                        <input type="number" step="0.1" name="temp_c" class="form-control form-control-sm" placeholder="36.8">
+                                    </div>
+                                    <div class="col-12">
+                                        <label class="form-label small text-muted mb-1">Pain Score (0 - 10 NRS)</label>
+                                        <input type="number" min="0" max="10" name="pain" class="form-control form-control-sm" placeholder="0 = None, 10 = Maximum">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="row g-2 mb-3">
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">Labs (Optional)</label>
+                                    <input type="text" name="labs" class="form-control form-control-sm" placeholder="e.g. Troponin T: 120 ng/L">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">Medications (Optional)</label>
+                                    <input type="text" name="medications" class="form-control form-control-sm" placeholder="e.g. Aspirin 300mg, stat">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted mb-1">Allergies (Optional)</label>
+                                    <input type="text" name="allergies" class="form-control form-control-sm" placeholder="e.g. Penicillin (High - Anaphylaxis)">
+                                </div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label small text-muted mb-1">
+                                    <i class="fas fa-paperclip text-secondary me-1"></i>Attach Clinical Note / Document (Optional PDF or Image)
+                                </label>
+                                <input type="file" name="clinical_attachment" class="form-control form-control-sm" accept=".pdf,.png,.jpg,.jpeg">
+                                <div class="form-text small text-muted">Upload a scanned referral PDF, ECG printout, or photo of handwritten triage slip to store with this record.</div>
+                            </div>
+
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span id="intake-spinner" class="htmx-indicator text-primary small">
+                                    <i class="fas fa-spinner fa-spin me-1"></i> Running MCP Validation Gate...
+                                </span>
+                                <button type="submit" class="btn btn-success px-4 ms-auto">
+                                    <i class="fas fa-check-circle me-1"></i> Calculate MTS &amp; Create FHIR Bundle
+                                </button>
+                            </div>
+                        </form>
+                        <div id="intake-result" class="mt-3"></div>
+                    </div>
+
+                    <!-- Tab 2: Batch File, PDF & Image Upload -->
+                    <div class="tab-pane fade" id="upload-pane" role="tabpanel" aria-labelledby="upload-tab">
+                        <form hx-post="/fhir/upload" hx-target="#upload-result" hx-encoding="multipart/form-data" hx-indicator="#upload-spinner">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                            <div class="border border-2 border-dashed rounded p-4 text-center bg-light mb-3">
+                                <div class="d-flex justify-content-center gap-3 mb-2">
+                                    <i class="fas fa-file-pdf fa-2x text-danger"></i>
+                                    <i class="fas fa-file-image fa-2x text-info"></i>
+                                    <i class="fas fa-file-csv fa-2x text-success"></i>
+                                </div>
+                                <h6 class="fw-bold mb-1">Upload Clinical Document, Scanned Note or Batch File</h6>
+                                <p class="text-muted small mb-2">Supports handwritten note <strong>PDFs</strong>, clinical triage <strong>Images (PNG, JPG)</strong>, and raw <strong>CSV/JSON</strong> records.</p>
+                                <div class="mb-3">
+                                    <span class="badge bg-danger-subtle text-danger border border-danger-subtle me-1"><i class="fas fa-file-pdf me-1"></i>PDF Note / Referral</span>
+                                    <span class="badge bg-info-subtle text-info border border-info-subtle me-1"><i class="fas fa-camera me-1"></i>Triage Photo (PNG / JPG)</span>
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle"><i class="fas fa-table me-1"></i>CSV / JSON Batch</span>
+                                </div>
+                                <input type="file" name="clinical_file" class="form-control w-75 mx-auto" accept=".pdf,.png,.jpg,.jpeg,.csv,.tsv,.json,.txt" required>
+                                <div class="form-text small text-muted mt-2">
+                                    <i class="fas fa-shield-alt text-primary me-1"></i>Validated deterministically via MCP guardrails into standard HL7 FHIR R4.
+                                </div>
+                            </div>
+
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span id="upload-spinner" class="htmx-indicator text-primary small">
+                                    <i class="fas fa-spinner fa-spin me-1"></i> Running OCR &amp; MCP Validation Gate...
+                                </span>
+                                <button type="submit" class="btn btn-primary px-4 ms-auto">
+                                    <i class="fas fa-upload me-1"></i> Ingest &amp; Validate via MCP
+                                </button>
+                            </div>
+                        </form>
+                        <div id="upload-result" class="mt-3"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

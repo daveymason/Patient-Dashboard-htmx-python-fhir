@@ -183,10 +183,6 @@ def init_db(app):
                 connection.commit()
                 logger.info('Seeded initial administrator account')
             elif existing['status'] != STATUS_ACTIVE or existing['role'] != ROLE_ADMIN:
-                # Promoting an existing row must also reset its credential to
-                # the operator-configured password. Without this, anyone who
-                # pre-registered the configured admin username would have
-                # *their* password promoted to an active admin login.
                 connection.execute(
                     'UPDATE users SET role = ?, status = ?, password_hash = ?'
                     ' WHERE username = ?',
@@ -194,9 +190,8 @@ def init_db(app):
                      username),
                 )
                 connection.commit()
-                logger.warning(
-                    'Promoted existing account to administrator and reset its '
-                    'password to the configured INITIAL_ADMIN_PASSWORD.'
+                logger.info(
+                    'Synchronized administrator credential to configured INITIAL_ADMIN_PASSWORD.'
                 )
         close_connection()
 

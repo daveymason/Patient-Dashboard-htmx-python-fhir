@@ -165,10 +165,21 @@ thead.table-dark {
     cursor: pointer;
 }
 
-.sidebar .nav-link i {
-    font-size: 1.2rem;
-    margin-right: 15px;
+.sidebar .nav-link {
+    gap: 10px;
+}
+
+.sidebar .nav-link * {
+    pointer-events: none;
+}
+
+.sidebar .nav-link i,
+.sidebar .nav-link svg,
+.sidebar .nav-link .svg-inline--fa {
+    font-size: 1.15rem;
+    margin-right: 0 !important;
     min-width: 20px;
+    width: 20px;
     text-align: center;
 }
 
@@ -206,13 +217,6 @@ thead.table-dark {
     height: 100%;
     width: 4px;
     background-color: var(--tropical-secondary);
-}
-
-/* Sidebar loader behavior */
-.sidebar:not(:hover) .nav-link::after {
-    width: 50% !important;
-    left: 25% !important;
-    animation: none !important;
 }
 
 .main-content {
@@ -397,4 +401,33 @@ header.with-sidebar {
         margin-left: 0;
         width: 100%;
     }
+}
+
+/* Collapsible MTS Priority Categories */
+.mts-category-card {
+    transition: all 0.2s ease-in-out;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.mts-category-card summary {
+    list-style: none;
+    cursor: pointer;
+    transition: background-color 0.15s ease-in-out;
+}
+
+.mts-category-card summary::-webkit-details-marker {
+    display: none;
+}
+
+.mts-category-card summary:hover {
+    filter: brightness(0.97);
+}
+
+.mts-category-card summary .accordion-arrow {
+    transition: transform 0.25s ease-in-out;
+}
+
+.mts-category-card[open] summary .accordion-arrow {
+    transform: rotate(180deg);
 }

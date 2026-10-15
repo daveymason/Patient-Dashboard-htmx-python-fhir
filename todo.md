@@ -1,0 +1,8 @@
+- [x] **Ensure the sidebar works properly (URL updating)**: Added `hx-push-url="/?view={{ key }}"` and full browser history popstate synchronization.
+- [x] **Collapsible MTS Triage Queue Minimisation**: Implemented 5 category accordions (Cat 1-3 open, Cat 4-5 collapsed by default) with "Expand All", "Focus Urgent (Collapse Cat 4-5)", and session storage preference persistence.
+- [x] **Add more patients**: Expanded test cohort to 18 diverse clinical emergency records covering all 5 Manchester Triage System categories.
+- [x] **Allow adding patients (Manual entry + File Upload)**: Built in-dashboard intake modal with Fast Triage Form (deterministic MTS scoring & sub-second FHIR R4 generation) and Batch CSV Dropzone synced with the OpenHands autonomous daemon.
+- [x] **Architectural Stopgap & Justification**: Documented monorepo vs multi-repo trade-offs in `stopgap.md`.
+- [x] **Create unified project packaging**: Packaged turnkey appliance orchestration into a single executive control script (`./run.sh`), `Makefile`, and `docker-compose.yml` supporting `start`, `stop`, `status`, `test`, `ingest`, and `logs`.
+- [x] **Fix sidebar single-click navigation**: Resolved pointer-event trapping on SVG icons and eliminated View Transition API interaction locks (`hx-swap="innerHTML"`) with full `popstate` history synchronization.
+- [x] **Add PDF and Image to Patient Intake & Relocate from Header**: Removed the intake button from the top navbar, added the dedicated `(Add Patient / Ingest)` button to the Patients page header, and added multimodal PDF and Image (PNG/JPG) ingestion with FastMCP zero-hallucination validation gates.

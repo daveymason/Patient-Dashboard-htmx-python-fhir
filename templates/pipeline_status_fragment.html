@@ -1,0 +1,101 @@
+<div id="pipeline-status-container" hx-get="/pipeline/status_fragment" hx-trigger="every 4s" hx-swap="outerHTML">
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center py-3">
+            <h5 class="mb-0">
+                <i class="fas fa-microchip text-info me-2"></i>Slainte-Engine Autonomous Ingestion Pipeline
+            </h5>
+            <span class="badge bg-success"><i class="fas fa-check-circle me-1"></i> Engine Active</span>
+        </div>
+        <div class="card-body">
+            <div class="row g-4 mb-4">
+                <div class="col-md-3">
+                    <div class="p-3 bg-light rounded text-center border">
+                        <div class="text-xs text-muted text-uppercase fw-bold">Agent Sandbox</div>
+                        <div class="h5 mb-0 text-primary fw-bold mt-1">OpenHands Runtime</div>
+                        <small class="badge bg-primary text-white mt-2">Zero-Trust Agent</small>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="p-3 bg-light rounded text-center border">
+                        <div class="text-xs text-muted text-uppercase fw-bold">Clinical Tooling</div>
+                        <div class="h5 mb-0 text-success fw-bold mt-1">Slainte-Scan-MCP</div>
+                        <small class="badge bg-success text-white mt-2">Deterministic Guardrails</small>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="p-3 bg-light rounded text-center border">
+                        <div class="text-xs text-muted text-uppercase fw-bold">Raw Ingestion Dropzone</div>
+                        <div class="h5 mb-0 text-warning fw-bold mt-1">{{ raw_file_count }} Raw File(s)</div>
+                        <small class="text-muted font-monospace d-block mt-2">/workspace/data/raw</small>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="p-3 bg-light rounded text-center border">
+                        <div class="text-xs text-muted text-uppercase fw-bold">Verified FHIR R4 Store</div>
+                        <div class="h5 mb-0 text-info fw-bold mt-1">{{ fhir_bundle_count }} FHIR Bundle(s)</div>
+                        <small class="text-muted font-monospace d-block mt-2">/workspace/data/fhir_store</small>
+                    </div>
+                </div>
+            </div>
+
+            <h6 class="fw-bold text-dark mb-3"><i class="fas fa-stream me-2 text-primary"></i>Ingestion Loop & Validation Telemetry</h6>
+            <div class="table-responsive">
+                <table class="table table-bordered table-sm align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Pipeline Stage</th>
+                            <th>Execution Guardrail</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Step A: Schema Discovery</strong></td>
+                            <td>Introspect raw CSV headers & detect clinical parameters</td>
+                            <td><span class="badge bg-success"><i class="fas fa-check me-1"></i> scan_clinical_schema OK</span></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Step B: Terminology Binding</strong></td>
+                            <td>Strict deterministic mapping to SNOMED-CT & LOINC</td>
+                            <td><span class="badge bg-success"><i class="fas fa-check me-1"></i> resolve_terminology OK</span></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Step C: Manchester Triage Engine</strong></td>
+                            <td>Deterministic mathematical MTS category 1-5 allocation</td>
+                            <td><span class="badge bg-success"><i class="fas fa-check me-1"></i> calculate_mts_category OK</span></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Step D: FHIR R4 Schema Validator</strong></td>
+                            <td>Zero-Hallucination verification of Irish GMS OID & types</td>
+                            <td><span class="badge bg-success"><i class="fas fa-shield-alt me-1"></i> validate_fhir_resource OK</span></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Step E: Dashboard Stream</strong></td>
+                            <td>Direct zero-latency ingestion into HTMX clinical queue</td>
+                            <td><span class="badge bg-success"><i class="fas fa-sync me-1"></i> Live Active</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            {% if recent_files %}
+            <h6 class="fw-bold text-dark mt-4 mb-2"><i class="fas fa-file-medical me-2 text-success"></i>Recently Stored FHIR Bundles</h6>
+            <ul class="list-group list-group-flush border rounded">
+                {% for rf in recent_files %}
+                <li class="list-group-item d-flex justify-content-between align-items-center py-2">
+                    <div>
+                        <i class="fas fa-file-code text-primary me-2"></i>
+                        <span class="font-monospace text-dark">{{ rf.name }}</span>
+                    </div>
+                    <span class="badge bg-light text-muted border">{{ rf.size }} bytes</span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% endif %}
+        </div>
+        <div class="card-footer bg-light d-flex justify-content-between align-items-center text-muted small py-2">
+            <span><i class="fas fa-heartbeat text-danger me-1"></i> Slainte-Engine Appliance v1.0.0</span>
+            <span>Last polled: {{ refreshed_time }}</span>
+        </div>
+    </div>
+</div>

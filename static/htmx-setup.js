@@ -22,16 +22,88 @@
         }
     });
 
+    function syncActiveNav() {
+        var params = new URLSearchParams(window.location.search);
+        var currentView = params.get('view') || 'triage';
+        document.querySelectorAll('.sidebar .nav-link').forEach(function (link) {
+            var href = link.getAttribute('href') || '';
+            var target = link.getAttribute('hx-get') || '';
+            var view = link.getAttribute('data-view') || '';
+            var isMatch = (href.indexOf('view=' + currentView) !== -1) || (view === currentView);
+            link.classList.toggle('active', isMatch);
+        });
+    }
+
+    // Restore collapsible MTS categories state across live polling swaps
+    function restoreMtsCollapsibleState() {
+        document.querySelectorAll('.mts-category-card').forEach(function (el) {
+            var cat = el.getAttribute('data-cat');
+            if (cat) {
+                var saved = sessionStorage.getItem('mts_cat_' + cat + '_open');
+                if (saved !== null) {
+                    el.open = (saved === '1');
+                }
+            }
+        });
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        syncActiveNav();
+        restoreMtsCollapsibleState();
+    });
+
+    window.addEventListener('popstate', function () {
+        syncActiveNav();
+        var params = new URLSearchParams(window.location.search);
+        var currentView = params.get('view') || 'triage';
+        var views = {
+            'triage': '/fhir/Triage',
+            'pipeline': '/pipeline/status',
+            'patients': '/fhir/Patients',
+            'stats': '/fhir/Demographics',
+            'insights': '/fhir/Dashboard'
+        };
+        var targetUrl = views[currentView];
+        var content = document.getElementById('content');
+        if (content && targetUrl && window.htmx) {
+            window.htmx.ajax('GET', targetUrl, { target: '#content', swap: 'innerHTML' });
+        }
+    });
+
+    // Save toggle changes on MTS categories
+    document.addEventListener('toggle', function (e) {
+        if (e.target && e.target.classList && e.target.classList.contains('mts-category-card')) {
+            var cat = e.target.getAttribute('data-cat');
+            if (cat) {
+                sessionStorage.setItem('mts_cat_' + cat + '_open', e.target.open ? '1' : '0');
+            }
+        }
+    }, true);
+
+    // Global toggle helpers accessible from window
+    window.expandAllCategories = function (openState) {
+        document.querySelectorAll('.mts-category-card').forEach(function (el) {
+            el.open = Boolean(openState);
+            var cat = el.getAttribute('data-cat');
+            if (cat) {
+                sessionStorage.setItem('mts_cat_' + cat + '_open', openState ? '1' : '0');
+            }
+        });
+    };
+
+    window.collapseNonUrgent = function () {
+        document.querySelectorAll('.mts-category-card').forEach(function (el) {
+            var cat = parseInt(el.getAttribute('data-cat') || '0', 10);
+            var shouldOpen = (cat <= 3);
+            el.open = shouldOpen;
+            sessionStorage.setItem('mts_cat_' + cat + '_open', shouldOpen ? '1' : '0');
+        });
+    };
+
     // Highlight the sidebar entry matching whatever was just loaded.
     document.body.addEventListener('htmx:afterSwap', function (event) {
-        var config = event.detail.requestConfig;
-        if (!config || !config.path) {
-            return;
-        }
-        document.querySelectorAll('.sidebar .nav-link').forEach(function (link) {
-            var target = link.getAttribute('hx-get');
-            link.classList.toggle('active', Boolean(target) && config.path.indexOf(target) === 0);
-        });
+        syncActiveNav();
+        restoreMtsCollapsibleState();
     });
 
     // Surface failures instead of leaving a panel silently blank.
